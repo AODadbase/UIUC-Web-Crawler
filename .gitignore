@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+
+crawler_state.db
+uiuc_knowledge_base/
+
+proxies.txt
+
+.DS_Store
