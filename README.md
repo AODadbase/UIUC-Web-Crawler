@@ -55,7 +55,7 @@ chmod +x run_all.sh
 ```
 
 ## Project Structure
-
+```text
 ├── main.py              # Entry point & Hybrid Crawler logic
 ├── reorganize_ai.py     # Zero-Shot AI Classification script
 ├── database.py          # SQLite state management
@@ -64,3 +64,4 @@ chmod +x run_all.sh
 ├── legacy/              # Archived scripts from previous iterations
 ├── uiuc_knowledge_base/ # [Output] Structured Data (Ignored by Git)
 └── requirements.txt     # Dependencies
+```
