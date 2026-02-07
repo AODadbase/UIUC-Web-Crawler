@@ -52,6 +52,7 @@ Use the automated shell script to run the crawler followed by the AI classifier:
 ```bash
 chmod +x run_all.sh
 ./run_all.sh
+```
 
 ## Project Structure
 
