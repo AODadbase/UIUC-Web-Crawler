@@ -99,7 +99,53 @@ class StorageManager:
             "events": ["event", "calendar", "schedule", "workshop", "seminar"],
             "policies": ["policy", "regulation", "code", "conduct", "privacy"],
             "about": ["about", "history", "mission", "contact"],
-            "news": ["news", "blog", "story"]
+            "news": ["news", "blog", "story"],
+            "isss": [
+                "isss", "international student", "international students", "international office",
+                "international services", "immigration", "visa", "visas", "sevis",
+                "i-20", "i20", "ds-2019", "ds2019", "f-1", "f1", "j-1", "j1",
+                "opt", "cpt", "stem opt", "optional practical training",
+                "curricular practical training", "international scholar", "exchange visitor"
+            ],
+            "admissions": [
+                "admission", "admissions", "apply", "application", "applicant",
+                "deadline", "deadlines", "required documents", "requirements",
+                "test score", "test scores", "sat", "act", "toefl", "ielts", "gre", "gmat",
+                "transfer", "transfer student", "readmission", "deferral", "defer", "prospective student"
+            ],
+            "student_support": [
+                "orientation", "new student", "welcome days", "welcome week",
+                "student success", "success program", "tutoring", "tutor",
+                "advising", "advisor", "academic advising", "writing center",
+                "first-gen", "first generation", "mentoring", "mentor", "coaching"
+            ],
+            "student_life": [
+                "student life", "student organization", "student organizations", "club", "clubs",
+                "rso", "registered student organization", "campus recreation", "rec center",
+                "student government", "leadership program", "volunteer", "volunteering", "service project"
+            ],
+            "athletics": [
+                "athletic", "athletics", "sport", "sports", "varsity", "intramural", "intramurals",
+                "gym", "fitness", "workout", "recreation", "rec center", "stadium", "arena", "pool"
+            ],
+            "accessibility": [
+                "disability", "dres", "accessible", "accessibility", "accommodation", "accommodations",
+                "assistive", "wheelchair", "exam accommodation", "testing accommodation"
+            ],
+            "diversity": [
+                "diversity", "equity", "inclusion", "inclusive", "dei", "bias report", "bias incident",
+                "cultural center", "cultural centers", "lgbt", "lgbtq"
+            ],
+            "alumni": [
+                "alumni", "alumnus", "alumna", "alumnae", "alumni association", "alumni network",
+                "giving", "give", "donor", "donors", "fundraising", "advancement", "development office",
+                "homecoming", "alumni event", "alumni events"
+            ],
+            "campus_services": [
+                "id card", "i-card", "icard", "campus card", "printing", "printer", "copying",
+                "mail", "mailroom", "package", "packages", "campus store", "bookstore",
+                "lost and found", "lost & found"
+            ]
         }
 
     def classify(self, url, text):

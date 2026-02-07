@@ -1,3 +1,8 @@
+import os
+import shutil
+import logging
+from transformers import pipeline
+
 # ================= 终极配置：覆盖几乎所有大学场景 =================
 # reorganize_ai.py
 BASE_DIR = "uiuc_knowledge_base"
@@ -11,18 +16,34 @@ CANDIDATE_LABELS = [
     "administrative department or office",       # 行政部门 (如教务处、校长室)
     "student organization or club",              # RSO、社团
 
+    # 招生与录取
+    "university admissions and enrollment information",  # 本科/研究生招生、录取、截止日期
+
     # 学术与教学
     "academic course syllabus and description",  # 课程介绍
     "degree major and minor requirements",       # 专业要求
     "academic calendar and deadlines",           # 校历、截止日期
     "library resources and databases",           # 图书馆
 
+    # 新生与支持服务
+    "new student orientation and academic support services",  # 新生说明会、辅导、写作中心
+
     # 生活与后勤
     "student housing and residence halls",       # 宿舍
     "dining services and menus",                 # 食堂
     "campus parking and transportation",         # 停车、公交
     "health and wellness services",              # 麦金利健康中心、心理咨询
+    "student immunization and vaccination requirements",  # 疫苗、免疫要求
     "campus safety and police",                  # 警察、安全
+
+    # 学生生活与社团
+    "student life organizations and campus involvement",  # 学生生活、学生组织、活动
+
+    # 体育与休闲
+    "university athletics sports and recreation programs",  # 校队、健身房、运动设施
+
+    # 国际学生与签证 (ISSS)
+    "international student and scholar services and immigration",  # ISSS、签证、移民
 
     # 财务与职业
     "tuition, scholarships and financial aid",   # 学费、奖学金
@@ -36,6 +57,16 @@ CANDIDATE_LABELS = [
     # 规则与技术
     "university policy and code of conduct",     # 规章制度
     "it support and software services",          # IT 服务、VPN、邮箱
+
+    # 可及性与多元包容
+    "disability resources and accessibility services",     # 残障支持、无障碍服务
+    "diversity equity and inclusion offices and programs", # 多元、公平与包容
+
+    # 校友与捐赠
+    "alumni relations networks and giving opportunities",  # 校友、捐赠
+
+    # 校园服务与后勤
+    "campus services logistics and id cards",    # 校园卡、打印、邮件、失物招领
 
     # 垃圾过滤 (非常重要)
     "login page or access denied error",         # 登录页、403
@@ -56,12 +87,28 @@ LABEL_TO_DIR = {
     "academic calendar and deadlines": "events", # 或者 "academics" 看你喜好
     "library resources and databases": "library",
 
+    # Admissions & Enrollment
+    "university admissions and enrollment information": "admissions",
+
     # Housing & Life
     "student housing and residence halls": "housing",
     "dining services and menus": "housing", # 通常食堂归宿舍管，或者单独 "dining"
     "campus parking and transportation": "transportation",
     "health and wellness services": "health",
+    "student immunization and vaccination requirements": "health",
     "campus safety and police": "safety",
+
+    # Orientation & Support
+    "new student orientation and academic support services": "student_support",
+
+    # Student Life & Orgs
+    "student life organizations and campus involvement": "student_life",
+
+    # Athletics & Recreation
+    "university athletics sports and recreation programs": "athletics",
+
+    # International & ISSS
+    "international student and scholar services and immigration": "isss",
 
     # Money & Job
     "tuition, scholarships and financial aid": "financial",
@@ -75,6 +122,16 @@ LABEL_TO_DIR = {
     # Misc
     "university policy and code of conduct": "policies",
     "it support and software services": "it_services",
+
+    # Accessibility & DEI
+    "disability resources and accessibility services": "accessibility",
+    "diversity equity and inclusion offices and programs": "diversity",
+
+    # Alumni & Giving
+    "alumni relations networks and giving opportunities": "alumni",
+
+    # Campus Services & Logistics
+    "campus services logistics and id cards": "campus_services",
 
     # Trash
     "login page or access denied error": "trash",
