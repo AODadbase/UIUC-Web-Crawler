@@ -1,22 +1,28 @@
-# UIUC Knowledge Base Crawler for LLM 🎓
+# UIUC Knowledge Base Crawler (AI-Powered) 
 
-A robust, full-cycle web crawler designed to build a comprehensive knowledge base for the University of Illinois Urbana-Champaign (UIUC). This project serves as an ETL pipeline to feed Vertical Large Language Models (LLMs) with high-quality, structured data.
+A production-grade, full-cycle web crawler designed to build a comprehensive knowledge base for the University of Illinois Urbana-Champaign (UIUC). This project serves as an ETL pipeline to feed Vertical Large Language Models (LLMs) with high-quality, structured data.
 
 ## Key Features
 
-* **Hybrid Architecture**: Combines `aiohttp` for high-concurrency static fetching and `Playwright` for dynamic content rendering (JavaScript/React pages).
-* **Intelligent Extraction**: Uses `Trafilatura` and custom algorithms to extract main content while filtering out navigation, ads, and boilerplate noise.
-* **Incremental Updates**: Implements a SQLite-based state management system to track content hashes, ensuring only new or updated pages are processed.
-* **Lifecycle Management**: Automatically detects and prunes 404/stale content to verify data integrity.
-* **Anti-Detection**: Built-in middleware for User-Agent rotation and Proxy integration.
-* **Structured Output**: Exports data in Markdown (for RAG) and JSONL (for LLM Fine-tuning), automatically categorized by domain (Academics, Housing, etc.).
+### 1. Hybrid Crawling Engine
+* **Speed & Power**: Combines `aiohttp` for high-concurrency static fetching and `Playwright` for dynamic content rendering (React/JS pages).
+* **Resilience**: Features automatic retries, `crt.sh` subdomain discovery, and fallback strategies.
+* **Stealth**: Built-in middleware for User-Agent rotation and Proxy integration.
 
-## 🛠️ Tech Stack
+### 2. Intelligent Data Processing
+* **Smart Extraction**: Uses `Trafilatura` to algorithmically extract main content, removing ads, navigation bars, and boilerplate noise.
+* **Zero-Shot AI Classification**: Utilizes a pre-trained NLI model (BART) to semantically categorize pages into specific domains (e.g., *Faculty Profiles, Course Syllabi, Research Labs*) with high precision.
+
+### 3. Lifecycle Management
+* **Incremental Updates**: Uses SQLite and Content Hashing to track changes, ensuring only new or updated pages are processed.
+* **Auto-Pruning**: Automatically detects and removes stale content (404s) to maintain data integrity.
+
+## Tech Stack
 
 * **Core**: Python 3.10+
-* **Network**: aiohttp, Playwright
-* **Parsing**: lxml, Trafilatura
-* **Storage**: SQLite, aiofiles (Async I/O)
+* **Network**: `aiohttp`, `Playwright`
+* **AI/NLP**: `Transformers` (Hugging Face), `Trafilatura`
+* **Storage**: `SQLite`, `aiofiles`
 
 ## Installation
 
@@ -29,7 +35,7 @@ A robust, full-cycle web crawler designed to build a comprehensive knowledge bas
 2.  Create and activate a virtual environment:
     ```bash
     python -m venv .venv
-    source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+    source .venv/bin/activate  # Windows: .venv\Scripts\activate
     ```
 
 3.  Install dependencies:
@@ -40,18 +46,20 @@ A robust, full-cycle web crawler designed to build a comprehensive knowledge bas
 
 ## Usage
 
-1.  (Optional) Add your proxy servers to `proxies.txt` (one per line).
-2.  Run the crawler:
-    ```bash
-    python main.py
-    ```
-3.  Output data will be saved in `uiuc_knowledge_base/` organized by categories.
+### One-Click Run (Recommended)
+Use the automated shell script to run the crawler followed by the AI classifier:
+
+```bash
+chmod +x run_all.sh
+./run_all.sh
 
 ## Project Structure
 
-```text
 ├── main.py              # Entry point & Hybrid Crawler logic
+├── reorganize_ai.py     # Zero-Shot AI Classification script
 ├── database.py          # SQLite state management
 ├── middleware.py        # Proxy & User-Agent rotation
-├── uiuc_knowledge_base/ # Output Data (Ignored by Git)
+├── run_all.sh           # Automation script
+├── legacy/              # Archived scripts from previous iterations
+├── uiuc_knowledge_base/ # [Output] Structured Data (Ignored by Git)
 └── requirements.txt     # Dependencies

@@ -83,16 +83,23 @@ class PlaywrightManager:
     
 
 class StorageManager:
-    """Manage classification and markdown-based storage of crawled pages."""
     def __init__(self, base_dir):
         self.base_dir = base_dir
         self.categories = {
-            "academics": ["course", "syllabus", "curriculum", "major", "minor", "degree", "gpa", "credit", "catalog", "class"],
-            "housing": ["housing", "dorm", "residence", "hall", "apartment", "lease", "dining"],
-            "financial": ["scholarship", "tuition", "aid", "grant", "loan", "cost", "fee"],
-            "career": ["career", "internship", "job", "resume"],
-            "research": ["research", "lab", "publication", "thesis"],
-            "news": ["news", "blog", "event", "calendar"]
+            "people": [
+                "professor", "faculty", "staff", "phd", "instructor", "lecturer", 
+                "directory", "profile", "postdoc", "candidate", "dean", "chair"
+            ],
+            "academics": ["course", "syllabus", "curriculum", "major", "minor", "degree", "gpa", "credit", "catalog", "class", "registrar"],
+            "housing": ["housing", "dorm", "residence", "hall", "apartment", "lease", "dining", "roommate"],
+            "financial": ["scholarship", "tuition", "aid", "grant", "loan", "cost", "fee", "bursar"],
+            "career": ["career", "internship", "job", "resume", "handshake", "recruiting"],
+            "research": ["research", "lab", "publication", "thesis", "citation"], # 移除了 professor
+            "library": ["library", "database", "collection", "borrow", "archive"],
+            "events": ["event", "calendar", "schedule", "workshop", "seminar"],
+            "policies": ["policy", "regulation", "code", "conduct", "privacy"],
+            "about": ["about", "history", "mission", "contact"],
+            "news": ["news", "blog", "story"]
         }
 
     def classify(self, url, text):
@@ -104,7 +111,9 @@ class StorageManager:
                 if word in url_lower: scores[category] += 5
                 scores[category] += text_lower.count(word)
         best = max(scores, key=scores.get)
-        return best if scores[best] > 2 else "uncategorized"
+        if scores[best] <= 2: 
+            return "uncategorized"
+        return best
 
     async def save_data(self, data, category):
         save_dir = os.path.join(self.base_dir, category)
