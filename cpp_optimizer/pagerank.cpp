@@ -205,14 +205,17 @@ int main() {
                   << sorted_ranks[i].first << std::endl;
     }
 
-    // 6. Save results to file
+    // 6. Save all results to file (sorted by rank for easier inspection)
     std::ofstream out("pagerank_results.txt");
     if (out.is_open()) {
         for (const auto& [url, rank] : sorted_ranks) {
             out << std::fixed << std::setprecision(6) << rank << "\t" << url << "\n";
         }
         out.close();
-        std::cout << "Results saved to pagerank_results.txt" << std::endl;
+        std::cout << "\nPageRank scores saved to pagerank_results.txt (" << sorted_ranks.size() << " entries)" << std::endl;
+        std::cout << "These scores will be injected as metadata by log_resolver." << std::endl;
+    } else {
+        std::cerr << "Warning: Could not write pagerank_results.txt" << std::endl;
     }
 
     return 0;

@@ -8,9 +8,14 @@
 #include <condition_variable>
 #include <filesystem>
 #include <sstream>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 #include <algorithm>
+
+// Global PageRank scores map (loaded once at startup)
+std::unordered_map<std::string, double> pagerank_scores;
+std::mutex pr_mutex;
 
 // Data structure for a crawled page entry
 struct PageEntry {
@@ -85,6 +90,32 @@ std::string sanitize_filename(std::string url) {
     return filename + ".md";
 }
 
+// Load PageRank scores from file
+void load_pagerank_scores(const std::string& pr_file) {
+    std::ifstream file(pr_file);
+    if (!file.is_open()) {
+        std::cerr << "Warning: PageRank file not found. Scores will default to 1.0" << std::endl;
+        return;
+    }
+    
+    double score;
+    std::string url;
+    int count = 0;
+    
+    while (file >> score) {
+        std::getline(file, url); // Read rest of line (tab + url)
+        // Trim leading whitespace/tab
+        size_t start = url.find_first_not_of(" \t");
+        if (start != std::string::npos) {
+            url = url.substr(start);
+            pagerank_scores[url] = score;
+            count++;
+        }
+    }
+    
+    std::cout << "Loaded " << count << " PageRank scores from " << pr_file << std::endl;
+}
+
 // Consumer thread: generate Markdown files from parsed JSON lines
 void file_writer_worker(SafeQueue<std::string>& input_queue, std::string output_dir) {
     std::string line;
@@ -110,11 +141,30 @@ void file_writer_worker(SafeQueue<std::string>& input_queue, std::string output_
             }
         }
 
+        // Get PageRank score for this URL (default to 1.0 if not found)
+        double pr_score = 1.0;
+        {
+            std::lock_guard<std::mutex> lock(pr_mutex);
+            if (pagerank_scores.count(url)) {
+                pr_score = pagerank_scores[url];
+            }
+        }
+        
+        // Determine priority based on PageRank threshold
+        std::string priority = (pr_score > 5.0) ? "high" : "normal";
+        
         std::ofstream outfile(filepath);
         if (outfile.is_open()) {
-            outfile << "> URL: " << url << "\n";
-            outfile << "> Title: " << title << "\n";
-            outfile << "> Category: uncategorized\n\n";
+            // Write YAML frontmatter
+            outfile << "---\n";
+            outfile << "url: " << url << "\n";
+            outfile << "title: " << title << "\n";
+            outfile << "category: uncategorized\n";
+            outfile << "pagerank_score: " << std::fixed << std::setprecision(6) << pr_score << "\n";
+            outfile << "priority: " << priority << "\n";
+            outfile << "---\n\n";
+            
+            // Write content
             outfile << "# " << title << "\n\n";
             outfile << clean_content;
             outfile.close();
@@ -125,7 +175,11 @@ void file_writer_worker(SafeQueue<std::string>& input_queue, std::string output_
 int main() {
     std::string log_file = "raw_crawl.jsonl";
     std::string output_dir = "uiuc_knowledge_base/uncategorized";
+    std::string pr_file = "pagerank_results.txt";
 
+    // Load PageRank scores
+    load_pagerank_scores(pr_file);
+    
     // Ensure output directory exists
     fs::create_directories(output_dir);
 

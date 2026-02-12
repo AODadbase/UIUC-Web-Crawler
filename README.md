@@ -15,10 +15,16 @@ A production-grade, full-cycle web crawler designed to build a comprehensive kno
 
 ### 3. C++ Optimizer Pipeline
 High-performance analysis tools written in multithreaded C++17:
-* **Log Resolver** (`log_resolver`): Converts raw JSONL crawl logs into structured Markdown files using a thread-safe producer-consumer queue.
-* **PageRank** (`pagerank`): Computes page importance scores via parallel PageRank iteration with early convergence detection. Results saved to `pagerank_results.txt`.
+* **PageRank** (`pagerank`): Computes page importance scores via parallel PageRank iteration with early convergence detection. Results saved to `pagerank_results.txt` for downstream use.
+* **Log Resolver** (`log_resolver`): Converts raw JSONL crawl logs into structured Markdown files with **YAML frontmatter injection**. Reads PageRank scores and embeds them as metadata (e.g., `pagerank_score: 3.452`, `priority: high`) for AI-ready retrieval.
 * **SimHash** (`simhash`): Detects near-duplicate pages using 64-bit SimHash fingerprints and Hamming distance comparison. Results saved to `simhash_results.txt`.
 * **Inverted Index** (`inverted_index`): Builds a parallel inverted index for full-text search with per-word URL deduplication. Results saved to `inverted_index.txt`.
+
+**Why This Matters for AI/RAG:**  
+The Markdown files produced by `log_resolver` include structured metadata that enables:
+- **Tiered Retrieval**: Query only high-authority pages first (`pagerank_score > 5.0`)
+- **Authority Weighting**: Pass scores to LLMs as confidence signals during RAG
+- **Deduplication**: Use SimHash fingerprints to avoid retrieving redundant content
 
 ### 4. Lifecycle Management
 * **Incremental Updates**: Uses SQLite (WAL mode) and content hashing (via `database.py` / `StorageManager`) to track changes, ensuring only new or updated pages are processed.
@@ -72,8 +78,25 @@ chmod +x run_all.sh
 
 The pipeline executes three phases:
 1. **Crawl** — `main.py` discovers subdomains and crawls pages into `raw_crawl.jsonl`
-2. **C++ Analysis** — Compiles and runs log resolver, PageRank, SimHash, and inverted index
+2. **C++ Analysis & Enrichment**:
+   - `pagerank` computes authority scores → `pagerank_results.txt`
+   - `log_resolver` generates Markdown **with embedded PageRank metadata** as YAML frontmatter
 3. **AI Reorganization** — `reorganize_ai.py` classifies uncategorized pages into topic folders
+
+**Output Example** (generated Markdown with metadata):
+```markdown
+---
+url: https://admissions.illinois.edu/
+title: Undergraduate Admissions
+category: uncategorized
+pagerank_score: 8.342156
+priority: high
+---
+
+# Undergraduate Admissions
+
+[content...]
+```
 
 ### Run Individual Components
 
