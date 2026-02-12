@@ -6,6 +6,7 @@ import json
 import logging
 import hashlib
 import trafilatura
+import lxml.html
 from urllib.parse import urlparse, urljoin
 from datetime import datetime
 from database import StorageManager
@@ -15,7 +16,7 @@ from playwright.async_api import async_playwright
 
 # ================= Configuration =================
 ROOT_DOMAIN = "illinois.edu"
-MAX_PAGES_TOTAL = 300 
+MAX_PAGES_TOTAL = 300
 CONCURRENCY = 5
 DATA_DIR = "uiuc_knowledge_base"
 
@@ -57,145 +58,35 @@ class PlaywrightManager:
         # Randomize user agent and proxy per request
         ua = self.middleware.get_random_ua()
         proxy = self.middleware.get_playwright_proxy()
-        
+
         # Create a context bound to the chosen user agent and proxy
         context = await self.browser.new_context(
             user_agent=ua,
-            proxy=proxy, 
+            proxy=proxy,
             viewport={'width': 1920, 'height': 1080}
         )
-        
+
         page = await context.new_page()
         try:
-            # 1. 缩短超时到 15秒 (15000ms)，避免傻等
-            # wait_until="domcontentloaded" 比 networkidle 更快，它不等图片完全加载完
+            # Shortened timeout to 15s; domcontentloaded is faster than networkidle
             await page.goto(url, timeout=15000, wait_until="domcontentloaded")
-            
-            # 2. [新增] 强制等待 1-2 秒，让 JS 有机会渲染文字
-            await page.wait_for_timeout(1500) 
-            
-            # 3. [新增] 模拟滚动到底部 (触发 Lazy Load 内容)
-            # 很多 UIUC 的课程列表只有滚下去才会显示
+
+            # Wait 1.5s for JS to render content
+            await page.wait_for_timeout(1500)
+
+            # Scroll to bottom to trigger lazy-loaded content
+            # Many UIUC course listings only render on scroll
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            await page.wait_for_timeout(1000) # 滚完再等 1 秒
-            
+            await page.wait_for_timeout(1000)  # Wait 1s after scrolling
+
             content = await page.content()
             return content
         except Exception as e:
-            # logging.error(f"Playwright fetch failed: {e}")
+            logging.error(f"Playwright fetch failed: {e}")
             return None
         finally:
             await page.close()
             await context.close()
-    
-
-class StorageManager:
-    def __init__(self, base_dir):
-        self.base_dir = base_dir
-        self.categories = {
-            "people": [
-                "professor", "faculty", "staff", "phd", "instructor", "lecturer", 
-                "directory", "profile", "postdoc", "candidate", "dean", "chair"
-            ],
-            "academics": ["course", "syllabus", "curriculum", "major", "minor", "degree", "gpa", "credit", "catalog", "class", "registrar"],
-            "housing": ["housing", "dorm", "residence", "hall", "apartment", "lease", "dining", "roommate"],
-            "financial": ["scholarship", "tuition", "aid", "grant", "loan", "cost", "fee", "bursar"],
-            "career": ["career", "internship", "job", "resume", "handshake", "recruiting"],
-            "research": ["research", "lab", "publication", "thesis", "citation"], # "professor" removed to avoid over-matching
-            "library": ["library", "database", "collection", "borrow", "archive"],
-            "events": ["event", "calendar", "schedule", "workshop", "seminar"],
-            "policies": ["policy", "regulation", "code", "conduct", "privacy"],
-            "about": ["about", "history", "mission", "contact"],
-            "news": ["news", "blog", "story"],
-            "isss": [
-                "isss", "international student", "international students", "international office",
-                "international services", "immigration", "visa", "visas", "sevis",
-                "i-20", "i20", "ds-2019", "ds2019", "f-1", "f1", "j-1", "j1",
-                "opt", "cpt", "stem opt", "optional practical training",
-                "curricular practical training", "international scholar", "exchange visitor"
-            ],
-            "admissions": [
-                "admission", "admissions", "apply", "application", "applicant",
-                "deadline", "deadlines", "required documents", "requirements",
-                "test score", "test scores", "sat", "act", "toefl", "ielts", "gre", "gmat",
-                "transfer", "transfer student", "readmission", "deferral", "defer", "prospective student"
-            ],
-            "student_support": [
-                "orientation", "new student", "welcome days", "welcome week",
-                "student success", "success program", "tutoring", "tutor",
-                "advising", "advisor", "academic advising", "writing center",
-                "first-gen", "first generation", "mentoring", "mentor", "coaching"
-            ],
-            "student_life": [
-                "student life", "student organization", "student organizations", "club", "clubs",
-                "rso", "registered student organization", "campus recreation", "rec center",
-                "student government", "leadership program", "volunteer", "volunteering", "service project"
-            ],
-            "athletics": [
-                "athletic", "athletics", "sport", "sports", "varsity", "intramural", "intramurals",
-                "gym", "fitness", "workout", "recreation", "rec center", "stadium", "arena", "pool"
-            ],
-            "accessibility": [
-                "disability", "dres", "accessible", "accessibility", "accommodation", "accommodations",
-                "assistive", "wheelchair", "exam accommodation", "testing accommodation"
-            ],
-            "diversity": [
-                "diversity", "equity", "inclusion", "inclusive", "dei", "bias report", "bias incident",
-                "cultural center", "cultural centers", "lgbt", "lgbtq"
-            ],
-            "alumni": [
-                "alumni", "alumnus", "alumna", "alumnae", "alumni association", "alumni network",
-                "giving", "give", "donor", "donors", "fundraising", "advancement", "development office",
-                "homecoming", "alumni event", "alumni events"
-            ],
-            "campus_services": [
-                "id card", "i-card", "icard", "campus card", "printing", "printer", "copying",
-                "mail", "mailroom", "package", "packages", "campus store", "bookstore",
-                "lost and found", "lost & found"
-            ]
-        }
-
-    def classify(self, url, text):
-        scores = {k: 0 for k in self.categories.keys()}
-        text_lower = text.lower()
-        url_lower = url.lower()
-        for category, keywords in self.categories.items():
-            for word in keywords:
-                if word in url_lower: scores[category] += 5
-                scores[category] += text_lower.count(word)
-        best = max(scores, key=scores.get)
-        if scores[best] <= 2: 
-            return "uncategorized"
-        return best
-
-    async def save_data(self, data, category):
-        save_dir = os.path.join(self.base_dir, category)
-        os.makedirs(save_dir, exist_ok=True)
-        safe_name = self._clean_filename(data['url'])
-        md_path = os.path.join(save_dir, f"{safe_name}.md")
-        md_content = f"# {data['title']}\n\n> URL: {data['url']}\n> Category: {category}\n> Updated: {data['timestamp']}\n\n---\n\n{data['content']}"
-        async with aiofiles.open(md_path, 'w', encoding='utf-8') as f:
-            await f.write(md_content)
-
-    async def delete_data(self, url, category):
-        safe_name = self._clean_filename(url)
-        filename = f"{safe_name}.md"
-        deleted = False
-        for cat in os.listdir(self.base_dir):
-            cat_dir = os.path.join(self.base_dir, cat)
-            if os.path.isdir(cat_dir):
-                target_file = os.path.join(cat_dir, filename)
-                if os.path.exists(target_file):
-                    os.remove(target_file)
-                    deleted = True
-        return deleted
-
-    def _clean_filename(self, url):
-        parsed = urlparse(url)
-        name = parsed.path.strip("/").replace("/", "_")
-        domain = parsed.netloc.replace(".", "_")
-        if not name: name = "index"
-        return f"{domain}_{name}"[:100]
 
 class UIUCPageParser:
     """Parse UIUC-related HTML pages into structured text and links."""
@@ -205,7 +96,7 @@ class UIUCPageParser:
 
     def parse(self):
         if not self.html_text: return None
-        
+
         # Extract main content using Trafilatura
         content = trafilatura.extract(
             self.html_text, include_tables=True, output_format='markdown', deduplicate=True
@@ -213,12 +104,18 @@ class UIUCPageParser:
         if not content or len(content) < 50: return None
 
         # Extract links so the crawler can continue following pages
-        import lxml.html
+        links = []
         try:
             tree = lxml.html.fromstring(self.html_text)
-            links = tree.xpath('//a/@href')
+            # Extract all href attributes and convert to absolute URLs
+            raw_links = tree.xpath('//a/@href')
+            for link in raw_links:
+                full_url = urljoin(self.url, link)
+                # Keep only same-domain links, excluding static assets
+                if ROOT_DOMAIN in full_url and not full_url.endswith(('.css', '.js', '.png', '.jpg', '.pdf')):
+                    links.append(full_url)
         except:
-            links = []
+            pass
 
         metadata = trafilatura.extract_metadata(self.html_text)
         title = metadata.title if (metadata and metadata.title) else "No Title"
@@ -240,7 +137,7 @@ class UnifiedCrawler:
         self.middleware = RequestMiddleware()
         self.pw_manager = PlaywrightManager(self.middleware)
         self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0, "blacklisted": 0}
-        
+
         # Initialize in-memory blacklist
         self.blacklist = set()
         self._load_blacklist()
@@ -265,7 +162,7 @@ class UnifiedCrawler:
 
     async def start(self):
         print(f"Starting hybrid crawler (aiohttp + Playwright). Target domain: {ROOT_DOMAIN}")
-        
+
         # Start Playwright browser engine
         await self.pw_manager.start()
 
@@ -275,11 +172,11 @@ class UnifiedCrawler:
             await self.queue.join()
             for w in workers: w.cancel()
             await self.prune_stale_content(session)
-            
+
         # Shut down Playwright browser engine
         await self.pw_manager.stop()
         self.storage.close()
-        
+
         print("\n" + "="*40)
         print("Crawl completed")
         print(f"Pages scanned: {self.stats['scanned']}")
@@ -292,12 +189,12 @@ class UnifiedCrawler:
     async def inject_subdomains(self, session):
         """Seed the crawler with subdomains discovered from crt.sh or fallbacks."""
         print("[Phase 1] Discovering subdomains...")
-        
-        # ⛔️ [关键修改] 垃圾子域名黑名单
-        # 这些词如果出现在子域名里，直接不要，防止爬虫卡死在内网登录页
+
+        # Subdomain blacklist: skip subdomains containing these keywords
+        # to avoid crawling internal login pages, VPNs, etc.
         IGNORED_SUBS = [
-            "auth", "login", "sso", "shibboleth", "vpn", "mail", "email", 
-            "outlook", "exchange", "kronos", "canvas", "compass", "moodle", 
+            "auth", "login", "sso", "shibboleth", "vpn", "mail", "email",
+            "outlook", "exchange", "kronos", "canvas", "compass", "moodle",
             "test", "dev", "stage", "staging", "demo", "admin", "intranet",
             "printing", "calendar", "directory", "files", "ftp", "remote",
             "cites", "help", "support", "status"
@@ -305,41 +202,32 @@ class UnifiedCrawler:
 
         crt_success = False
         try:
-            # ✅ [关键修改] 超时设为 10秒，别傻等
+            # Timeout set to 10s to avoid long waits
             url = f"https://crt.sh/?q=%.{ROOT_DOMAIN}&output=json"
             async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     for entry in data:
                         sub = entry['name_value'].split('\n')[0].replace('*.', '')
-                        
-                        # --- 过滤逻辑开始 ---
+
+                        # Filter out unwanted subdomains
                         should_skip = False
                         for bad_word in IGNORED_SUBS:
                             if bad_word in sub:
                                 should_skip = True
                                 break
-                        # --- 过滤逻辑结束 ---
 
                         if not should_skip and sub.endswith(ROOT_DOMAIN):
                             full_url = f"https://{sub}"
                             if full_url not in self.visited:
                                 self.queue.put_nowait(full_url)
                                 self.visited.add(full_url)
-                    
+
                     crt_success = True
                     print("✅ Seeded subdomains from crt.sh (Filtered)")
         except Exception as e:
             print(f"⚠️ crt.sh failed: {e}")
             pass
-
-        if not crt_success or self.queue.qsize() == 0:
-            print("Using fallback seed URLs")
-            seeds = [f"https://www.{ROOT_DOMAIN}", f"https://housing.{ROOT_DOMAIN}", f"https://academics.{ROOT_DOMAIN}", f"https://cs.{ROOT_DOMAIN}"]
-            for seed in seeds:
-                if seed not in self.visited:
-                    self.queue.put_nowait(seed)
-                    self.visited.add(seed)
 
         if not crt_success or self.queue.qsize() == 0:
             print("Using fallback seed URLs")
@@ -365,15 +253,15 @@ class UnifiedCrawler:
                 # Prepare request headers and proxy
                 headers = self.middleware.get_random_header()
                 proxy = self.middleware.get_random_proxy()
-                
+
                 use_playwright = False
                 for kw in DYNAMIC_KEYWORDS:
                     if kw in url:
                         use_playwright = True
                         break
-                
+
                 html_text = ""
-                
+
                 # --- Execution Path A: Playwright (Heavy) ---
                 if use_playwright:
                     html_text = await self.pw_manager.fetch_page(url)
@@ -398,29 +286,29 @@ class UnifiedCrawler:
                             elif response.status in [401, 403, 404]:
                                 logging.warning(f"⚠️ [Auto-blacklist] Status {response.status} - {url}")
                                 await self.add_to_blacklist(url)
-                            
+
                             # ============================================================
                             # [Upgrade 3] Retry logic for temporary rate limits
                             # 429: Too Many Requests (rate limited) -> put back in queue
                             # ============================================================
                             elif response.status == 429:
                                 logging.warning(f"⚠️ [Rate limit] 429 - {url} (retrying later)")
-                                self.queue.put_nowait(url) 
+                                self.queue.put_nowait(url)
 
                     except Exception as e:
                         # Network errors (timeout, connection reset) are not necessarily blacklist-worthy
                         # We just skip them for now
                         pass
-                
+
                 # --- Fallback Logic ---
                 # If static fetch returns too little content (e.g. < 500 chars), it might be JS-protected.
                 # Retry with Playwright.
                 if not use_playwright and (not html_text or len(html_text) < 500):
-                     # logging.info(f"[Fallback] Static content too short, switching to Playwright: {url}")
-                     html_text = await self.pw_manager.fetch_page(url)
+                    logging.info(f"[Fallback] Static content too short, switching to Playwright: {url}")
+                    html_text = await self.pw_manager.fetch_page(url)
 
                 # ============================================================
-                 # [Upgrade 4] Final validation and storage
+                # [Upgrade 4] Final validation and storage
                 # ============================================================
                 if html_text and len(html_text) > 100:
                     await self.process_html(html_text, url)
@@ -438,22 +326,22 @@ class UnifiedCrawler:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                # logging.error(f"Worker Error: {e}")
+                logging.error(f"Worker Error: {e}")
                 self.queue.task_done()
 
     async def process_html(self, html, url):
         """Parse raw HTML, decide whether to store it, and enqueue new links."""
         parser = UIUCPageParser(html, url)
         data = parser.parse()
-        
-        if not data: return 
+
+        if not data: return
 
         content_hash = hashlib.md5(data['content'].encode('utf-8')).hexdigest()
         should_save, status = self.storage.should_process(url, content_hash)
         category = self.storage.classify(url, data['title'] + " " + data['content'])
 
         if should_save:
-            await self.storage.save_data(data, category)
+            await self.storage.save_page(data['url'], data['title'], data['content'], data.get('links', []), category)
             self.storage.upsert_page(url, content_hash, category, data['title'])
             if status == "NEW":
                 self.stats['new'] += 1

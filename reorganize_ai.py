@@ -1,8 +1,8 @@
 import os
 import shutil
 import logging
-from transformers import pipeline
 import re
+from transformers import pipeline
 
 # ================= High-level configuration for university content =================
 # reorganize_ai.py
@@ -152,70 +152,18 @@ class AIClassifier:
     def classify(self, text):
         # Use the first 500 characters for efficiency
         sample_text = text[:500]
-        
+
         result = self.classifier(
             sample_text,
             CANDIDATE_LABELS,
             multi_label=False # Single-label prediction
         )
-        
+
         # Top label and confidence score
         top_label = result['labels'][0]
         confidence = result['scores'][0]
-        
+
         return top_label, confidence
-def add_to_blacklist(url):
-    """Append a URL to the blacklist file"""
-    if not url:
-        return
-    try:
-        with open("blacklist.txt", "a", encoding="utf-8") as f:
-            f.write(url + "\n")
-        print(f"⚠️ URL added to blacklist: {url}")
-    except Exception as e:
-        print(f"❌ Failed to update blacklist: {e}")
-
-def extract_url_from_markdown(content):
-    """Extract URL from Markdown metadata"""
-    # Match lines like: > URL: https://...
-    match = re.search(r'> URL: (.*)', content)
-    if match:
-        return match.group(1).strip()
-    return None
-
-def process_files_smartly():
-    # Process uncategorized files with AI assistance
-    
-    for filename in files:
-        file_path = os.path.join(TARGET_DIR, filename)
-        
-        try:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-            
-            # --- 修改开始 ---
-            
-            # 1. Basic length filter: blacklist and delete very short content
-            if len(content) < 150:
-                print(f"⚠️ [Too short] {filename}")
-                url = extract_url_from_markdown(content) # Extract URL
-                add_to_blacklist(url)                    # Blacklist URL
-                os.remove(file_path)                     # Delete file
-                stats["deleted"] += 1
-                continue
-
-            # 2. AI classification
-            label, score = ai.classify(content)
-            folder_name = LABEL_TO_DIR[label]
-            
-            if folder_name == "trash":
-                print(f"❌ [Classified as trash] {filename} (confidence: {score:.2f})")
-                url = extract_url_from_markdown(content) # Extract URL
-                add_to_blacklist(url)                    # Blacklist URL
-                os.remove(file_path)                     # Delete file
-                stats["deleted"] += 1
-        except Exception as e:
-            print(f"Error while processing {filename}: {e}")
 
 def add_to_blacklist(url):
     """Append a URL to the blacklist file"""
@@ -249,11 +197,11 @@ def process_files_smartly():
 
     for filename in files:
         file_path = os.path.join(TARGET_DIR, filename)
-        
+
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            
+
             # 1. Basic length filter: blacklist and delete very short content
             if len(content) < 150:
                 print(f"⚠️ [Too short] {filename}")
@@ -266,22 +214,22 @@ def process_files_smartly():
             # 2. AI classification
             label, score = ai.classify(content)
             folder_name = LABEL_TO_DIR[label]
-            
+
             if folder_name == "trash":
                 print(f"❌ [Classified as trash] {filename} (confidence: {score:.2f})")
                 url = extract_url_from_markdown(content) # Extract URL
                 add_to_blacklist(url)                    # Blacklist URL
                 os.remove(file_path)                     # Delete file
                 stats["deleted"] += 1
-            
+
             elif score > 0.4: # Confidence threshold; adjust as needed
                 target_dir = os.path.join(BASE_DIR, folder_name)
                 os.makedirs(target_dir, exist_ok=True)
-                
+
                 # Move the file to the target directory
                 new_path = os.path.join(target_dir, filename)
                 shutil.move(file_path, new_path)
-                
+
                 print(f"✅ [{folder_name.upper()}] {filename} (confidence: {score:.2f})")
                 stats["moved"] += 1
             else:

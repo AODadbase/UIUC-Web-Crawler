@@ -1,3 +1,4 @@
+# Core async IO and HTTP
 aiofiles==25.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
@@ -23,6 +24,7 @@ huggingface_hub==1.4.1
 idna==3.11
 Jinja2==3.1.6
 jusText==3.0.2
+# HTML parsing and extraction
 lxml==6.0.2
 lxml_html_clean==0.4.3
 MarkupSafe==3.0.3
@@ -31,6 +33,7 @@ multidict==6.7.1
 networkx==3.6.1
 numpy==2.4.2
 packaging==26.0
+# Headless browser for dynamic pages
 playwright==1.58.0
 propcache==0.4.1
 pyee==13.0.0
@@ -38,6 +41,7 @@ python-dateutil==2.9.0.post0
 pytz==2025.2
 PyYAML==6.0.3
 regex==2026.1.15
+# Transformers / Torch stack for AI reorganization
 safetensors==0.7.0
 setuptools==81.0.0
 shellingham==1.5.4

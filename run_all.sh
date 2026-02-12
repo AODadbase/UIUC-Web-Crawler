@@ -1,34 +1,22 @@
 #!/bin/bash
+set -e
+set -o pipefail
 
-PYTHON_CMD="./.venv/bin/python"
+# Resolve the directory this script lives in
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-echo "==========================================="
-echo "🚀 PHASE 1: HIGH-SPEED CRAWLING (Python)"
-echo "   Appending raw data to raw_crawl.jsonl..."
-echo "==========================================="
-# 确保 main.py 里的 log_mode=True 已经生效
-$PYTHON_CMD main.py
+# 1. Crawl
+"$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/main.py"
 
-echo ""
-echo "==========================================="
-echo "⚙️ PHASE 2: C++ HIGH-PERFORMANCE RESOLVER"
-echo "   Compiling and processing data..."
-echo "==========================================="
-
-# 1. 编译 C++ 工具
-cd cpp_optimizer
+# 2. Compile and run C++ analyzers
+cd "$SCRIPT_DIR/cpp_optimizer"
 make
-cd ..
+cd "$SCRIPT_DIR"
 
-# 2. 运行 C++ 工具生成 Markdown
-./cpp_optimizer/log_resolver
+"$SCRIPT_DIR/cpp_optimizer/log_resolver"
+"$SCRIPT_DIR/cpp_optimizer/pagerank"
+"$SCRIPT_DIR/cpp_optimizer/simhash"
+"$SCRIPT_DIR/cpp_optimizer/inverted_index"
 
-echo ""
-echo "==========================================="
-echo "🧠 PHASE 3: AI CLASSIFICATION (Python)"
-echo "   Organizing files..."
-echo "==========================================="
-$PYTHON_CMD reorganize_ai.py
-
-echo ""
-echo "🎉 PIPELINE COMPLETE!"
+# 3. AI-based reorganization
+"$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/reorganize_ai.py"
