@@ -74,3 +74,5 @@ https://otm.illinois.edu/disclose-protect/thesis-withholding
 http://oc.illinois.edu/commencement/
 https://choose.illinois.edu/register/?id=7d60a856-7a3e-4a19-b3d1-e58244606ce0
 http://www.grad.illinois.edu/thesis/process
+https://chem.illinois.edu
+http://sponsoredprograms.illinois.edu/education-outreach/principal-investigator-handbook

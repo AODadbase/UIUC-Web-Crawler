@@ -7,8 +7,10 @@ import logging
 import hashlib
 import trafilatura
 import lxml.html
+import subprocess
 from urllib.parse import urlparse, urljoin
 from datetime import datetime
+import time
 from database import StorageManager
 from middleware import RequestMiddleware
 # Playwright integration for handling dynamic pages
@@ -20,14 +22,19 @@ MAX_PAGES_TOTAL = 300
 CONCURRENCY = 5
 DATA_DIR = "uiuc_knowledge_base"
 
+POLITENESS_DELAY = 2.0   # Minimum seconds between requests to the same domain
+MAX_RETRIES_429 = 3      # Max retries before blacklisting a 429'd URL
+
 # Keywords indicating that a page is likely dynamic and should be fetched with Playwright
+SECURITYTRAILS_API_KEY = os.environ.get("SECURITYTRAILS_API_KEY", "")
+
 DYNAMIC_KEYWORDS = ["courses", "schedule", "calendar", "events", "directory", "apps"]
 
 # Optional click-interaction rules, mapping URL patterns to CSS selectors
 # Example: if URL contains "events", try clicking ".pagination-next" or similar
 INTERACTION_RULES = {
-    "events": ".pagination-next, .load-more-btn", # Example: click pagination or load-more buttons
-    "courses": "#show-details-btn",               # Example: expand course details
+    "events": ".pagination-next, .load-more-btn", 
+    "courses": "#show-details-btn",               
 }
 
 logging.basicConfig(
@@ -37,6 +44,24 @@ logging.basicConfig(
 )
 # =========================================
 
+class DomainRateLimiter:
+    """Per-domain rate limiter that enforces a minimum interval between requests."""
+
+    def __init__(self, delay=POLITENESS_DELAY):
+        self.delay = delay
+        self._last_request = {}  # domain -> monotonic timestamp
+        self._lock = asyncio.Lock()
+
+    async def wait(self, domain):
+        async with self._lock:
+            now = time.monotonic()
+            last = self._last_request.get(domain, 0.0)
+            wait_time = self.delay - (now - last)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            self._last_request[domain] = time.monotonic()
+
+
 class PlaywrightManager:
     """Wrapper around Playwright browser lifecycle and page fetching."""
 
@@ -44,17 +69,25 @@ class PlaywrightManager:
         self.playwright = None
         self.browser = None
         self.middleware = middleware
+        self.available = False
 
     async def start(self):
-        self.playwright = await async_playwright().start()
-        # Run Chromium in headless mode for better performance
-        self.browser = await self.playwright.chromium.launch(headless=True)
+        try:
+            self.playwright = await async_playwright().start()
+            # Run Chromium in headless mode for better performance
+            self.browser = await self.playwright.chromium.launch(headless=True)
+            self.available = True
+        except Exception as e:
+            logging.warning(f"⚠️ Playwright failed to launch: {e}. Falling back to aiohttp-only mode.")
+            self.available = False
 
     async def stop(self):
         if self.browser: await self.browser.close()
         if self.playwright: await self.playwright.stop()
 
     async def fetch_page(self, url):
+        if not self.available:
+            return None
         # Randomize user agent and proxy per request
         ua = self.middleware.get_random_ua()
         proxy = self.middleware.get_playwright_proxy()
@@ -133,9 +166,11 @@ class UnifiedCrawler:
     def __init__(self):
         self.queue = asyncio.Queue()
         self.visited = set()
-        self.storage = StorageManager(DATA_DIR)
+        self.storage = StorageManager(DATA_DIR, log_mode=True)
         self.middleware = RequestMiddleware()
         self.pw_manager = PlaywrightManager(self.middleware)
+        self.rate_limiter = DomainRateLimiter()
+        self.retry_counts = {}  # url -> retry count for 429 backoff
         self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0, "blacklisted": 0}
 
         # Initialize in-memory blacklist
@@ -163,8 +198,11 @@ class UnifiedCrawler:
     async def start(self):
         print(f"Starting hybrid crawler (aiohttp + Playwright). Target domain: {ROOT_DOMAIN}")
 
-        # Start Playwright browser engine
-        await self.pw_manager.start()
+        # Start Playwright browser engine (falls back to aiohttp-only if unavailable)
+        try:
+            await self.pw_manager.start()
+        except Exception as e:
+            logging.warning(f"⚠️ Playwright startup error: {e}. Continuing with aiohttp-only mode.")
 
         async with aiohttp.ClientSession() as session:
             await self.inject_subdomains(session)
@@ -187,7 +225,7 @@ class UnifiedCrawler:
         print("="*40)
 
     async def inject_subdomains(self, session):
-        """Seed the crawler with subdomains discovered from crt.sh or fallbacks."""
+        """Seed the crawler with subdomains discovered from multiple sources with fallback."""
         print("[Phase 1] Discovering subdomains...")
 
         # Subdomain blacklist: skip subdomains containing these keywords
@@ -200,37 +238,127 @@ class UnifiedCrawler:
             "cites", "help", "support", "status"
         ]
 
-        crt_success = False
+        subdomains = set()
+
+        # --- Source 1: crt.sh (Certificate Transparency logs) ---
+        for attempt in range(3):
+            try:
+                url = f"https://crt.sh/?q=%.{ROOT_DOMAIN}&output=json"
+                async with session.get(url, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        for entry in data:
+                            sub = entry['name_value'].split('\n')[0].replace('*.', '')
+                            if sub.endswith(ROOT_DOMAIN):
+                                subdomains.add(sub)
+                        print(f"  ✅ crt.sh: found {len(subdomains)} subdomains")
+                        break
+                    elif attempt < 2:
+                        print(f"  ⚠️ crt.sh returned status {resp.status}, retrying ({attempt+1}/3)...")
+                        await asyncio.sleep(2)
+                    else:
+                        print(f"  ⚠️ crt.sh failed after 3 attempts (status {resp.status})")
+            except Exception as e:
+                if attempt < 2:
+                    print(f"  ⚠️ crt.sh failed: {e}, retrying ({attempt+1}/3)...")
+                    await asyncio.sleep(2)
+                else:
+                    print(f"  ⚠️ crt.sh failed after 3 attempts: {e}")
+
+        # --- Source 2: Wayback Machine CDX API (free, no auth, reliable) ---
         try:
-            # Timeout set to 10s to avoid long waits
-            url = f"https://crt.sh/?q=%.{ROOT_DOMAIN}&output=json"
-            async with session.get(url, timeout=10) as resp:
+            wayback_url = f"http://web.archive.org/cdx/search/cdx?url=*.{ROOT_DOMAIN}&output=json&fl=original&collapse=urlkey&limit=5000"
+            async with session.get(wayback_url, timeout=15) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    for entry in data:
-                        sub = entry['name_value'].split('\n')[0].replace('*.', '')
-
-                        # Filter out unwanted subdomains
-                        should_skip = False
-                        for bad_word in IGNORED_SUBS:
-                            if bad_word in sub:
-                                should_skip = True
-                                break
-
-                        if not should_skip and sub.endswith(ROOT_DOMAIN):
-                            full_url = f"https://{sub}"
-                            if full_url not in self.visited:
-                                self.queue.put_nowait(full_url)
-                                self.visited.add(full_url)
-
-                    crt_success = True
-                    print("✅ Seeded subdomains from crt.sh (Filtered)")
+                    before = len(subdomains)
+                    for row in data[1:]:  # first row is header
+                        try:
+                            host = urlparse(row[0]).netloc
+                            if host and host.endswith(ROOT_DOMAIN):
+                                subdomains.add(host)
+                        except Exception:
+                            pass
+                    print(f"  ✅ Wayback CDX: added {len(subdomains) - before} new subdomains")
         except Exception as e:
-            print(f"⚠️ crt.sh failed: {e}")
-            pass
+            print(f"  ⚠️ Wayback CDX failed: {e}")
 
-        if not crt_success or self.queue.qsize() == 0:
-            print("Using fallback seed URLs")
+        # --- Source 3: Subfinder (ProjectDiscovery, queries 50+ passive sources) ---
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["subfinder", "-d", ROOT_DOMAIN, "-silent"],
+                capture_output=True, text=True, timeout=120
+            )
+            if result.returncode == 0:
+                before = len(subdomains)
+                for line in result.stdout.strip().splitlines():
+                    sub = line.strip()
+                    if sub and sub.endswith(ROOT_DOMAIN):
+                        subdomains.add(sub)
+                print(f"  ✅ Subfinder: added {len(subdomains) - before} new subdomains")
+            else:
+                print(f"  ⚠️ Subfinder returned non-zero exit code: {result.stderr.strip()}")
+        except FileNotFoundError:
+            print("  ⚠️ Subfinder not installed (go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest)")
+        except Exception as e:
+            print(f"  ⚠️ Subfinder failed: {e}")
+
+        # --- Source 4: SecurityTrails API ---
+        if SECURITYTRAILS_API_KEY:
+            try:
+                st_url = f"https://api.securitytrails.com/v1/domain/{ROOT_DOMAIN}/subdomains"
+                st_headers = {"APIKEY": SECURITYTRAILS_API_KEY, "Accept": "application/json"}
+                async with session.get(st_url, headers=st_headers, timeout=15) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        before = len(subdomains)
+                        for prefix in data.get("subdomains", []):
+                            subdomains.add(f"{prefix}.{ROOT_DOMAIN}")
+                        print(f"  ✅ SecurityTrails: added {len(subdomains) - before} new subdomains")
+                    else:
+                        print(f"  ⚠️ SecurityTrails returned status {resp.status}")
+            except Exception as e:
+                print(f"  ⚠️ SecurityTrails failed: {e}")
+        else:
+            print("  ⏭️ SecurityTrails skipped (set SECURITYTRAILS_API_KEY env var to enable)")
+
+        # --- Source 5: DNS bruteforce fallback (if other sources yielded too few results) ---
+        if len(subdomains) < 10:
+            COMMON_PREFIXES = [
+                "www", "cs", "ece", "math", "physics", "chem", "engr", "lib",
+                "housing", "academics", "admissions", "grad", "research",
+                "news", "athletics", "engineering", "education", "law",
+                "business", "medicine", "pharmacy", "arts", "music",
+                "provost", "chancellor", "hr", "it", "ics", "gis",
+                "data", "api", "web", "blog", "media", "studentaffairs",
+            ]
+            import socket
+            before = len(subdomains)
+            for prefix in COMMON_PREFIXES:
+                candidate = f"{prefix}.{ROOT_DOMAIN}"
+                try:
+                    socket.getaddrinfo(candidate, None, socket.AF_INET, socket.SOCK_STREAM)
+                    subdomains.add(candidate)
+                except socket.gaierror:
+                    pass
+            print(f"  ✅ DNS bruteforce: added {len(subdomains) - before} new subdomains")
+
+        # --- Filter and enqueue ---
+        seeded = 0
+        for sub in subdomains:
+            should_skip = any(bad_word in sub for bad_word in IGNORED_SUBS)
+            if not should_skip and sub.endswith(ROOT_DOMAIN):
+                full_url = f"https://{sub}"
+                if full_url not in self.visited:
+                    self.queue.put_nowait(full_url)
+                    self.visited.add(full_url)
+                    seeded += 1
+
+        if seeded > 0:
+            print(f"✅ Seeded {seeded} subdomains from {len(subdomains)} discovered (filtered)")
+        else:
+            print("⚠️ All sources failed or returned 0 results, using fallback seed URLs")
             seeds = [f"https://www.{ROOT_DOMAIN}", f"https://housing.{ROOT_DOMAIN}", f"https://academics.{ROOT_DOMAIN}", f"https://cs.{ROOT_DOMAIN}"]
             for seed in seeds:
                 if seed not in self.visited:
@@ -242,23 +370,25 @@ class UnifiedCrawler:
             try:
                 url = await self.queue.get()
 
-                # ============================================================
-                # [Upgrade 1] Pre-flight check: blacklist
-                # If the URL is already in the blacklist, skip it immediately.
-                # ============================================================
+
                 if url in self.blacklist:
                     self.queue.task_done()
                     continue
+
+                # Per-domain rate limiting
+                domain = urlparse(url).netloc
+                await self.rate_limiter.wait(domain)
 
                 # Prepare request headers and proxy
                 headers = self.middleware.get_random_header()
                 proxy = self.middleware.get_random_proxy()
 
                 use_playwright = False
-                for kw in DYNAMIC_KEYWORDS:
-                    if kw in url:
-                        use_playwright = True
-                        break
+                if self.pw_manager.available:
+                    for kw in DYNAMIC_KEYWORDS:
+                        if kw in url:
+                            use_playwright = True
+                            break
 
                 html_text = ""
 
@@ -278,22 +408,22 @@ class UnifiedCrawler:
                             if response.status == 200:
                                 html_text = await response.text()
 
-                            # ============================================================
-                            # [Upgrade 2] Permanent blacklist for invalid pages
-                            # 401/403: Forbidden (IP ban or login required)
-                            # 404: Not Found (dead link)
-                            # ============================================================
                             elif response.status in [401, 403, 404]:
                                 logging.warning(f"⚠️ [Auto-blacklist] Status {response.status} - {url}")
                                 await self.add_to_blacklist(url)
 
-                            # ============================================================
-                            # [Upgrade 3] Retry logic for temporary rate limits
-                            # 429: Too Many Requests (rate limited) -> put back in queue
-                            # ============================================================
                             elif response.status == 429:
-                                logging.warning(f"⚠️ [Rate limit] 429 - {url} (retrying later)")
-                                self.queue.put_nowait(url)
+                                retries = self.retry_counts.get(url, 0)
+                                if retries < MAX_RETRIES_429:
+                                    backoff = min(2 ** retries * 2, 60)
+                                    logging.warning(f"⚠️ [Rate limit] 429 - {url} (retry {retries+1}/{MAX_RETRIES_429}, backoff {backoff}s)")
+                                    self.retry_counts[url] = retries + 1
+                                    await asyncio.sleep(backoff)
+                                    self.queue.put_nowait(url)
+                                else:
+                                    logging.warning(f"⚠️ [Rate limit] 429 - {url} exceeded {MAX_RETRIES_429} retries, blacklisting")
+                                    await self.add_to_blacklist(url)
+                                    self.retry_counts.pop(url, None)
 
                     except Exception as e:
                         # Network errors (timeout, connection reset) are not necessarily blacklist-worthy
@@ -302,14 +432,11 @@ class UnifiedCrawler:
 
                 # --- Fallback Logic ---
                 # If static fetch returns too little content (e.g. < 500 chars), it might be JS-protected.
-                # Retry with Playwright.
-                if not use_playwright and (not html_text or len(html_text) < 500):
+                # Retry with Playwright (only if available).
+                if self.pw_manager.available and not use_playwright and (not html_text or len(html_text) < 500):
                     logging.info(f"[Fallback] Static content too short, switching to Playwright: {url}")
                     html_text = await self.pw_manager.fetch_page(url)
 
-                # ============================================================
-                # [Upgrade 4] Final validation and storage
-                # ============================================================
                 if html_text and len(html_text) > 100:
                     await self.process_html(html_text, url)
                 else:
@@ -320,7 +447,6 @@ class UnifiedCrawler:
                         # await self.add_to_blacklist(url)
                         pass
 
-                await asyncio.sleep(0.5)
                 self.queue.task_done()
 
             except asyncio.CancelledError:

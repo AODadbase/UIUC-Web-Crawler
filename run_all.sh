@@ -9,6 +9,10 @@ echo "✅ Phase 1: Python crawler..."
 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/main.py"
 
 echo ""
+echo "✅ Phase 1.5: Validating JSONL output..."
+"$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/validate_jsonl.py"
+
+echo ""
 echo "✅ Phase 2: C++ optimization pipeline..."
 
 # 2a. Compile C++ components if needed
