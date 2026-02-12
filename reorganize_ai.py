@@ -4,137 +4,137 @@ import logging
 from transformers import pipeline
 import re
 
-# ================= 终极配置：覆盖几乎所有大学场景 =================
+# ================= High-level configuration for university content =================
 # reorganize_ai.py
 BASE_DIR = "uiuc_knowledge_base"
-# 重点：只让 AI 处理机器看不懂的文件
+# Only send ambiguous files to the AI classifier
 TARGET_DIR = os.path.join(BASE_DIR, "uncategorized")
-# 1. 详细的自然语言描述 (给 AI 看的)
-# 描述越具体，AI 判断越准。不要只写 "Housing"，要写 "housing and residence hall info"
+# Detailed natural language labels for the classifier
+# Use specific labels for more accurate classification
 CANDIDATE_LABELS = [
-    # 核心：人与组织
-    "university faculty or staff profile",       # 教授、员工
-    "administrative department or office",       # 行政部门 (如教务处、校长室)
-    "student organization or club",              # RSO、社团
+    # People and organizations
+    "university faculty or staff profile",       # Faculty and staff profiles
+    "administrative department or office",       # Administrative departments and offices
+    "student organization or club",              # Student organizations and clubs
 
-    # 招生与录取
-    "university admissions and enrollment information",  # 本科/研究生招生、录取、截止日期
+    # Admissions and enrollment
+    "university admissions and enrollment information",  # Undergraduate and graduate admissions
 
-    # 学术与教学
-    "academic course syllabus and description",  # 课程介绍
-    "degree major and minor requirements",       # 专业要求
-    "academic calendar and deadlines",           # 校历、截止日期
-    "library resources and databases",           # 图书馆
+    # Academics and instruction
+    "academic course syllabus and description",  # Course descriptions and syllabi
+    "degree major and minor requirements",       # Degree requirements
+    "academic calendar and deadlines",           # Academic calendar and deadlines
+    "library resources and databases",           # Library resources
 
-    # 新生与支持服务
-    "new student orientation and academic support services",  # 新生说明会、辅导、写作中心
+    # Orientation and support
+    "new student orientation and academic support services",  # Orientation and academic support
 
-    # 生活与后勤
-    "student housing and residence halls",       # 宿舍
-    "dining services and menus",                 # 食堂
-    "campus parking and transportation",         # 停车、公交
-    "health and wellness services",              # 麦金利健康中心、心理咨询
-    "student immunization and vaccination requirements",  # 疫苗、免疫要求
-    "campus safety and police",                  # 警察、安全
+    # Housing and campus life
+    "student housing and residence halls",       # Housing and residence halls
+    "dining services and menus",                 # Dining services
+    "campus parking and transportation",         # Parking and transportation
+    "health and wellness services",              # Health and counseling services
+    "student immunization and vaccination requirements",  # Immunization requirements
+    "campus safety and police",                  # Campus safety and police
 
-    # 学生生活与社团
-    "student life organizations and campus involvement",  # 学生生活、学生组织、活动
+    # Student life
+    "student life organizations and campus involvement",  # Student life and involvement
 
-    # 体育与休闲
-    "university athletics sports and recreation programs",  # 校队、健身房、运动设施
+    # Athletics and recreation
+    "university athletics sports and recreation programs",  # Athletics and recreation
 
-    # 国际学生与签证 (ISSS)
-    "international student and scholar services and immigration",  # ISSS、签证、移民
+    # International students and scholars (ISSS)
+    "international student and scholar services and immigration",  # International services and immigration
 
-    # 财务与职业
-    "tuition, scholarships and financial aid",   # 学费、奖学金
-    "career services and job opportunities",     # 招聘、职业规划
+    # Finance and career
+    "tuition, scholarships and financial aid",   # Tuition and financial aid
+    "career services and job opportunities",     # Career services and jobs
 
-    # 研究与新闻
-    "scientific research lab or project",        # 实验室、项目
-    "university news, press release or story",   # 新闻
-    "public event, workshop or seminar",         # 活动、讲座
+    # Research and news
+    "scientific research lab or project",        # Research labs and projects
+    "university news, press release or story",   # University news and stories
+    "public event, workshop or seminar",         # Events and workshops
 
-    # 规则与技术
-    "university policy and code of conduct",     # 规章制度
-    "it support and software services",          # IT 服务、VPN、邮箱
+    # Policies and technology
+    "university policy and code of conduct",     # Policies and codes of conduct
+    "it support and software services",          # IT support and software services
 
-    # 可及性与多元包容
-    "disability resources and accessibility services",     # 残障支持、无障碍服务
-    "diversity equity and inclusion offices and programs", # 多元、公平与包容
+    # Accessibility and inclusion
+    "disability resources and accessibility services",     # Disability and accessibility resources
+    "diversity equity and inclusion offices and programs", # Diversity, equity, and inclusion
 
-    # 校友与捐赠
-    "alumni relations networks and giving opportunities",  # 校友、捐赠
+    # Alumni and giving
+    "alumni relations networks and giving opportunities",  # Alumni relations and giving
 
-    # 校园服务与后勤
-    "campus services logistics and id cards",    # 校园卡、打印、邮件、失物招领
+    # Campus services and logistics
+    "campus services logistics and id cards",    # Campus services and ID cards
 
-    # 垃圾过滤 (非常重要)
-    "login page or access denied error",         # 登录页、403
-    "website navigation menu or footer",         # 纯导航栏残留
-    "404 page not found"                         # 404
+    # Low-value or error pages
+    "login page or access denied error",         # Login-required or access-denied pages
+    "website navigation menu or footer",         # Pure navigation or footer pages
+    "404 page not found"                         # 404 pages
 ]
 
-# 2. 映射到简洁的文件夹名 (给硬盘看的)
+# Map verbose labels to concise directory names
 LABEL_TO_DIR = {
-    # People & Org
+    # People and organizations
     "university faculty or staff profile": "people",
-    "administrative department or office": "about", # 或者 "admin"
+    "administrative department or office": "about",
     "student organization or club": "student_life",
 
     # Academics
     "academic course syllabus and description": "academics",
     "degree major and minor requirements": "academics",
-    "academic calendar and deadlines": "events", # 或者 "academics" 看你喜好
+    "academic calendar and deadlines": "events",
     "library resources and databases": "library",
 
-    # Admissions & Enrollment
+    # Admissions and enrollment
     "university admissions and enrollment information": "admissions",
 
-    # Housing & Life
+    # Housing and campus life
     "student housing and residence halls": "housing",
-    "dining services and menus": "housing", # 通常食堂归宿舍管，或者单独 "dining"
+    "dining services and menus": "housing",
     "campus parking and transportation": "transportation",
     "health and wellness services": "health",
     "student immunization and vaccination requirements": "health",
     "campus safety and police": "safety",
 
-    # Orientation & Support
+    # Orientation and support
     "new student orientation and academic support services": "student_support",
 
-    # Student Life & Orgs
+    # Student life and organizations
     "student life organizations and campus involvement": "student_life",
 
-    # Athletics & Recreation
+    # Athletics and recreation
     "university athletics sports and recreation programs": "athletics",
 
-    # International & ISSS
+    # International students and scholars
     "international student and scholar services and immigration": "isss",
 
-    # Money & Job
+    # Finance and career
     "tuition, scholarships and financial aid": "financial",
     "career services and job opportunities": "career",
 
-    # Research & News
+    # Research and news
     "scientific research lab or project": "research",
     "university news, press release or story": "news",
     "public event, workshop or seminar": "events",
 
-    # Misc
+    # Policies and IT
     "university policy and code of conduct": "policies",
     "it support and software services": "it_services",
 
-    # Accessibility & DEI
+    # Accessibility and DEI
     "disability resources and accessibility services": "accessibility",
     "diversity equity and inclusion offices and programs": "diversity",
 
-    # Alumni & Giving
+    # Alumni and giving
     "alumni relations networks and giving opportunities": "alumni",
 
-    # Campus Services & Logistics
+    # Campus services and logistics
     "campus services logistics and id cards": "campus_services",
 
-    # Trash
+    # Low-value or error pages
     "login page or access denied error": "trash",
     "website navigation menu or footer": "trash",
     "404 page not found": "trash"
@@ -144,49 +144,47 @@ logging.basicConfig(level=logging.INFO)
 
 class AIClassifier:
     def __init__(self):
-        print("🧠 正在加载 AI 模型 (facebook/bart-large-mnli)... 这可能需要一点时间...")
-        # 使用 Zero-Shot Classification 流水线
-        # 它可以直接判断一句话属于哪个类别，无需任何训练数据
-        # device=-1 表示用 CPU，如果你有 NVIDIA 显卡改成 device=0
+        print("Loading zero-shot classification model (facebook/bart-large-mnli)... This may take a moment.")
+        # Use a zero-shot classification pipeline
+        # Classifies text into labels without task-specific training data
         self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
 
     def classify(self, text):
-        # 截取前 500 个字符给模型看（通常开头就包含了足够的信息）
-        # 这样速度快，且不会超过模型长度限制
+        # Use the first 500 characters for efficiency
         sample_text = text[:500]
         
         result = self.classifier(
             sample_text,
             CANDIDATE_LABELS,
-            multi_label=False # 强制单选
+            multi_label=False # Single-label prediction
         )
         
-        # result['labels'][0] 是得分最高的标签
-        # result['scores'][0] 是置信度 (0-1)
+        # Top label and confidence score
         top_label = result['labels'][0]
         confidence = result['scores'][0]
         
         return top_label, confidence
 def add_to_blacklist(url):
-    """同步写入黑名单"""
-    if not url: return
+    """Append a URL to the blacklist file"""
+    if not url:
+        return
     try:
         with open("blacklist.txt", "a", encoding="utf-8") as f:
             f.write(url + "\n")
-        print(f"🚫 URL 已加入黑名单: {url}")
+        print(f"URL added to blacklist: {url}")
     except Exception as e:
-        print(f"⚠️ 黑名单写入失败: {e}")
+        print(f"Failed to update blacklist: {e}")
 
 def extract_url_from_markdown(content):
-    """从 Markdown 元数据中提取 URL"""
-    # 匹配 > URL: https://...
+    """Extract URL from Markdown metadata"""
+    # Match lines like: > URL: https://...
     match = re.search(r'> URL: (.*)', content)
     if match:
         return match.group(1).strip()
     return None
 
 def process_files_smartly():
-    # ... (前面的代码不变) ...
+    # Process uncategorized files with AI assistance
     
     for filename in files:
         file_path = os.path.join(TARGET_DIR, filename)
@@ -197,41 +195,42 @@ def process_files_smartly():
             
             # --- 修改开始 ---
             
-            # 1. 基础过滤：如果内容太短 -> 拉黑 + 删除
+            # 1. Basic length filter: blacklist and delete very short content
             if len(content) < 150:
-                print(f"🗑️ [过短] {filename}")
-                url = extract_url_from_markdown(content) # 提取 URL
-                add_to_blacklist(url)                    # 拉黑
-                os.remove(file_path)                     # 删除
+                print(f"[Too short] {filename}")
+                url = extract_url_from_markdown(content) # Extract URL
+                add_to_blacklist(url)                    # Blacklist URL
+                os.remove(file_path)                     # Delete file
                 stats["deleted"] += 1
                 continue
 
-            # 2. AI 判决
+            # 2. AI classification
             label, score = ai.classify(content)
             folder_name = LABEL_TO_DIR[label]
             
             if folder_name == "trash":
-                print(f"🗑️ [AI判定垃圾] {filename} (置信度: {score:.2f})")
-                url = extract_url_from_markdown(content) # 提取 URL
-                add_to_blacklist(url)                    # 拉黑
-                os.remove(file_path)                     # 删除
+                print(f"[Classified as trash] {filename} (confidence: {score:.2f})")
+                url = extract_url_from_markdown(content) # Extract URL
+                add_to_blacklist(url)                    # Blacklist URL
+                os.remove(file_path)                     # Delete file
                 stats["deleted"] += 1
         except Exception as e:
-            print(f"⚠️ 处理出错 {filename}: {e}")
+            print(f"Error while processing {filename}: {e}")
 
 def add_to_blacklist(url):
-    """同步写入黑名单"""
-    if not url: return
+    """Append a URL to the blacklist file"""
+    if not url:
+        return
     try:
         with open("blacklist.txt", "a", encoding="utf-8") as f:
             f.write(url + "\n")
-        print(f"🚫 URL 已加入黑名单: {url}")
+        print(f"URL added to blacklist: {url}")
     except Exception as e:
-        print(f"⚠️ 黑名单写入失败: {e}")
+        print(f"Failed to update blacklist: {e}")
 
 def extract_url_from_markdown(content):
-    """从 Markdown 元数据中提取 URL"""
-    # 匹配 > URL: https://...
+    """Extract URL from Markdown metadata"""
+    # Match lines like: > URL: https://...
     match = re.search(r'> URL: (.*)', content)
     if match:
         return match.group(1).strip()
@@ -239,12 +238,12 @@ def extract_url_from_markdown(content):
 
 def process_files_smartly():
     if not os.path.exists(TARGET_DIR):
-        print("没有找到 uncategorized 文件夹。")
+        print("Uncategorized folder not found.")
         return
 
     ai = AIClassifier()
     files = [f for f in os.listdir(TARGET_DIR) if f.endswith(".md")]
-    print(f"🤖 AI 准备就绪，开始智能审阅 {len(files)} 个文件...\n")
+    print(f"AI classifier is ready. Reviewing {len(files)} files...\n")
 
     stats = {"moved": 0, "deleted": 0, "uncertain": 0}
 
@@ -255,50 +254,48 @@ def process_files_smartly():
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # --- 修改开始 ---
-            
-            # 1. 基础过滤：如果内容太短 -> 拉黑 + 删除
+            # 1. Basic length filter: blacklist and delete very short content
             if len(content) < 150:
-                print(f"🗑️ [过短] {filename}")
-                url = extract_url_from_markdown(content) # 提取 URL
-                add_to_blacklist(url)                    # 拉黑
-                os.remove(file_path)                     # 删除
+                print(f"[Too short] {filename}")
+                url = extract_url_from_markdown(content) # Extract URL
+                add_to_blacklist(url)                    # Blacklist URL
+                os.remove(file_path)                     # Delete file
                 stats["deleted"] += 1
                 continue
 
-            # 2. AI 判决
+            # 2. AI classification
             label, score = ai.classify(content)
             folder_name = LABEL_TO_DIR[label]
             
             if folder_name == "trash":
-                print(f"🗑️ [AI判定垃圾] {filename} (置信度: {score:.2f})")
-                url = extract_url_from_markdown(content) # 提取 URL
-                add_to_blacklist(url)                    # 拉黑
-                os.remove(file_path)                     # 删除
+                print(f"[Classified as trash] {filename} (confidence: {score:.2f})")
+                url = extract_url_from_markdown(content) # Extract URL
+                add_to_blacklist(url)                    # Blacklist URL
+                os.remove(file_path)                     # Delete file
                 stats["deleted"] += 1
             
-            elif score > 0.4: # 置信度阈值，你可以根据效果调整
+            elif score > 0.4: # Confidence threshold; adjust as needed
                 target_dir = os.path.join(BASE_DIR, folder_name)
                 os.makedirs(target_dir, exist_ok=True)
                 
-                # 移动文件
+                # Move the file to the target directory
                 new_path = os.path.join(target_dir, filename)
                 shutil.move(file_path, new_path)
                 
-                print(f"✅ [{folder_name.upper()}] {filename} (置信度: {score:.2f})")
+                print(f"[{folder_name.upper()}] {filename} (confidence: {score:.2f})")
                 stats["moved"] += 1
             else:
-                print(f"⚠️ [不确定] {filename} (最高匹配: {label}, {score:.2f}) -> 保持原位")
+                print(f"[Uncertain] {filename} (top match: {label}, {score:.2f}) -> left in place")
                 stats["uncertain"] += 1
 
         except Exception as e:
             print(f"Error processing {filename}: {e}")
 
     print("\n" + "="*30)
-    print(f"🤖 AI 归类完成")
-    print(f"📦 成功归类: {stats['moved']}")
-    print(f"🗑️ 删除垃圾: {stats['deleted']}")
-    print(f"🤔 依然存疑: {stats['uncertain']}")
+    print("AI classification complete")
+    print(f"Classified files: {stats['moved']}")
+    print(f"Deleted as trash: {stats['deleted']}")
+    print(f"Still uncertain: {stats['uncertain']}")
     print("="*30)
 
 if __name__ == "__main__":

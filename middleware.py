@@ -27,14 +27,14 @@ class RequestMiddleware:
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith("#"):
-                        # 标准化处理
+                        # Normalize proxy string
                         if not line.startswith("http"):
                             line = f"http://{line}"
                         self.proxies.append(line)
             if self.proxies:
-                logging.info(f"🛡️ 加载了 {len(self.proxies)} 个代理 IP")
+                logging.info(f"Loaded {len(self.proxies)} proxy endpoints")
         except FileNotFoundError:
-            logging.warning("⚠️ proxies.txt not found, using direct connections without proxies")
+            logging.warning("proxies.txt not found; using direct connections without proxies")
 
     def get_random_header(self):
         """Return HTTP headers with a randomized User-Agent."""
@@ -64,7 +64,7 @@ class RequestMiddleware:
         proxy_url = self.get_random_proxy()
         if not proxy_url: return None
         
-        # 简单的解析逻辑
+        # Basic parsing logic
         from urllib.parse import urlparse
         parsed = urlparse(proxy_url)
         

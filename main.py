@@ -25,8 +25,8 @@ DYNAMIC_KEYWORDS = ["courses", "schedule", "calendar", "events", "directory", "a
 # Optional click-interaction rules, mapping URL patterns to CSS selectors
 # Example: if URL contains "events", try clicking ".pagination-next" or similar
 INTERACTION_RULES = {
-    "events": ".pagination-next, .load-more-btn", # 示例：点击下一页或加载更多
-    "courses": "#show-details-btn",               # 示例：展开课程详情
+    "events": ".pagination-next, .load-more-btn", # Example: click pagination or load-more buttons
+    "courses": "#show-details-btn",               # Example: expand course details
 }
 
 logging.basicConfig(
@@ -61,7 +61,7 @@ class PlaywrightManager:
         # Create a context bound to the chosen user agent and proxy
         context = await self.browser.new_context(
             user_agent=ua,
-            proxy=proxy, # 如果 proxy 是 None，playwright 会自动忽略
+            proxy=proxy, # None is ignored by Playwright
             viewport={'width': 1920, 'height': 1080}
         )
         
@@ -94,7 +94,7 @@ class StorageManager:
             "housing": ["housing", "dorm", "residence", "hall", "apartment", "lease", "dining", "roommate"],
             "financial": ["scholarship", "tuition", "aid", "grant", "loan", "cost", "fee", "bursar"],
             "career": ["career", "internship", "job", "resume", "handshake", "recruiting"],
-            "research": ["research", "lab", "publication", "thesis", "citation"], # 移除了 professor
+            "research": ["research", "lab", "publication", "thesis", "citation"], # "professor" removed to avoid over-matching
             "library": ["library", "database", "collection", "borrow", "archive"],
             "events": ["event", "calendar", "schedule", "workshop", "seminar"],
             "policies": ["policy", "regulation", "code", "conduct", "privacy"],
@@ -235,30 +235,30 @@ class UnifiedCrawler:
         self.pw_manager = PlaywrightManager(self.middleware)
         self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0, "blacklisted": 0}
         
-        # [新增] 初始化黑名单
+        # Initialize in-memory blacklist
         self.blacklist = set()
         self._load_blacklist()
 
     def _load_blacklist(self):
-        """从文件加载黑名单"""
+        """Load blacklist entries from file"""
         if os.path.exists("blacklist.txt"):
             with open("blacklist.txt", "r", encoding="utf-8") as f:
                 for line in f:
                     self.blacklist.add(line.strip())
-            print(f"🛡️ 已加载 {len(self.blacklist)} 个黑名单规则")
+            print(f"Loaded {len(self.blacklist)} blacklist rules")
 
     async def add_to_blacklist(self, url):
-        """添加 URL 到黑名单（内存+文件）"""
+        """Add a URL to the blacklist (memory and file)"""
         if url not in self.blacklist:
             self.blacklist.add(url)
             self.stats['blacklisted'] += 1
-            # 异步写入文件，防止阻塞
+            # Asynchronously append to file to avoid blocking
             async with aiofiles.open("blacklist.txt", "a", encoding="utf-8") as f:
                 await f.write(url + "\n")
-            logging.warning(f"🚫 [已拉黑] {url}")
+            logging.warning(f"[Blacklisted] {url}")
 
     async def start(self):
-        print(f"🚀 启动混合动力爬虫 (aiohttp + Playwright) | 目标: {ROOT_DOMAIN}")
+        print(f"Starting hybrid crawler (aiohttp + Playwright). Target domain: {ROOT_DOMAIN}")
         
         # Start Playwright browser engine
         await self.pw_manager.start()
@@ -275,17 +275,17 @@ class UnifiedCrawler:
         self.db.close()
         
         print("\n" + "="*40)
-        print(f"🏆 全流程结束!")
-        print(f"📄 扫描: {self.stats['scanned']}")
-        print(f"✨ 新增: {self.stats['new']}")
-        print(f"🔄 更新: {self.stats['updated']}")
-        print(f"⏭️ 跳过: {self.stats['skipped']}")
-        print(f"🗑️ 删除: {self.stats['deleted']}")
+        print("Crawl completed")
+        print(f"Pages scanned: {self.stats['scanned']}")
+        print(f"New pages: {self.stats['new']}")
+        print(f"Updated pages: {self.stats['updated']}")
+        print(f"Skipped pages: {self.stats['skipped']}")
+        print(f"Deleted pages: {self.stats['deleted']}")
         print("="*40)
 
     async def inject_subdomains(self, session):
         """Seed the crawler with subdomains discovered from crt.sh or fallbacks."""
-        print("🔍 [Phase 1] 获取子域名...")
+        print("[Phase 1] Discovering subdomains...")
         crt_success = False
         try:
             url = f"https://crt.sh/?q=%.{ROOT_DOMAIN}&output=json"
@@ -300,12 +300,12 @@ class UnifiedCrawler:
                                 self.queue.put_nowait(full_url)
                                 self.visited.add(full_url)
                     crt_success = True
-                    print("✅ crt.sh 注入成功")
+                    print("Seeded subdomains from crt.sh")
         except:
             pass
 
         if not crt_success or self.queue.qsize() == 0:
-            print("🛡️ 启用保底种子")
+            print("Using fallback seed URLs")
             seeds = [f"https://www.{ROOT_DOMAIN}", f"https://housing.{ROOT_DOMAIN}", f"https://academics.{ROOT_DOMAIN}", f"https://cs.{ROOT_DOMAIN}"]
             for seed in seeds:
                 if seed not in self.visited:
@@ -318,7 +318,7 @@ class UnifiedCrawler:
                 url = await self.queue.get()
 
                 # ============================================================
-                # 🛑 [Upgrade 1] Pre-flight Check: Blacklist
+                # [Upgrade 1] Pre-flight check: blacklist
                 # If the URL is already in the blacklist, skip it immediately.
                 # ============================================================
                 if url in self.blacklist:
@@ -354,20 +354,20 @@ class UnifiedCrawler:
                                 html_text = await response.text()
 
                             # ============================================================
-                            # 🚫 [Upgrade 2] Punishment Logic: Permanent Ban
-                            # 401/403: Forbidden (IP ban or Login required)
-                            # 404: Not Found (Dead link)
+                            # [Upgrade 2] Permanent blacklist for invalid pages
+                            # 401/403: Forbidden (IP ban or login required)
+                            # 404: Not Found (dead link)
                             # ============================================================
                             elif response.status in [401, 403, 404]:
-                                logging.warning(f"🚫 [Auto-Blacklist] Status {response.status} - {url}")
+                                logging.warning(f"[Auto-blacklist] Status {response.status} - {url}")
                                 await self.add_to_blacklist(url)
                             
                             # ============================================================
-                            # ⏳ [Upgrade 3] Retry Logic: Temporary Ban
-                            # 429: Too Many Requests (Rate Limited) -> Put back in queue
+                            # [Upgrade 3] Retry logic for temporary rate limits
+                            # 429: Too Many Requests (rate limited) -> put back in queue
                             # ============================================================
                             elif response.status == 429:
-                                logging.warning(f"⏳ [Rate Limit] 429 - {url} (Retrying later...)")
+                                logging.warning(f"[Rate limit] 429 - {url} (retrying later)")
                                 self.queue.put_nowait(url) 
 
                     except Exception as e:
@@ -379,11 +379,11 @@ class UnifiedCrawler:
                 # If static fetch returns too little content (e.g. < 500 chars), it might be JS-protected.
                 # Retry with Playwright.
                 if not use_playwright and (not html_text or len(html_text) < 500):
-                     # logging.info(f"⚠️ [Fallback] Static content too short, switching to Playwright: {url}")
+                     # logging.info(f"[Fallback] Static content too short, switching to Playwright: {url}")
                      html_text = await self.pw_manager.fetch_page(url)
 
                 # ============================================================
-                # ✅ [Upgrade 4] Final Validation & Storage
+                 # [Upgrade 4] Final validation and storage
                 # ============================================================
                 if html_text and len(html_text) > 100:
                     await self.process_html(html_text, url)
@@ -391,7 +391,7 @@ class UnifiedCrawler:
                     # If it's STILL empty after Fallback, it's likely a broken/empty page.
                     # We can choose to blacklist it to save future resources.
                     if html_text is not None: # Only blacklist if we actually got a response (empty string)
-                        # logging.warning(f"🗑️ [Empty Page] Blacklisting {url}")
+                        # logging.warning(f"[Empty page] Blacklisting {url}")
                         # await self.add_to_blacklist(url)
                         pass
 
@@ -420,10 +420,10 @@ class UnifiedCrawler:
             self.db.upsert_page(url, content_hash, category, data['title'])
             if status == "NEW":
                 self.stats['new'] += 1
-                logging.info(f"✨ [NEW] {data['title'][:20]}...")
+                logging.info(f"[NEW] {data['title'][:20]}...")
             else:
                 self.stats['updated'] += 1
-                logging.info(f"🔄 [UPDATED] {data['title'][:20]}...")
+                logging.info(f"[UPDATED] {data['title'][:20]}...")
         else:
             self.stats['skipped'] += 1
 

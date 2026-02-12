@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# 定义虚拟环境里的 Python 路径 (这是最稳妥的写法)
+# Define Python path inside the virtual environment
 PYTHON_CMD="./.venv/bin/python"
 
-echo "🚀 第一阶段：启动极速爬虫..."
+echo "Phase 1: starting high-speed crawler..."
 $PYTHON_CMD main.py
 
 echo "--------------------------------"
-echo "⏸️ 爬取完成。休息 3 秒..."
+echo "Crawling finished. Sleeping for 3 seconds..."
 sleep 3
 
-echo "🧠 第二阶段：启动 AI 智能归类..."
+echo "Phase 2: starting AI-based reorganization..."
 $PYTHON_CMD reorganize_ai.py
 
-echo "🎉 全部完成！知识库已更新。"
+echo "All tasks completed. Knowledge base has been updated."
