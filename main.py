@@ -231,12 +231,31 @@ class UnifiedCrawler:
         self.visited = set()
         self.storage = StorageManager(DATA_DIR)
         self.db = DBManager()
-        self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0}
-        # Initialize request middleware (user agents and proxies)
         self.middleware = RequestMiddleware()
-        
-        # Initialize Playwright manager with the same middleware
         self.pw_manager = PlaywrightManager(self.middleware)
+        self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0, "blacklisted": 0}
+        
+        # [新增] 初始化黑名单
+        self.blacklist = set()
+        self._load_blacklist()
+
+    def _load_blacklist(self):
+        """从文件加载黑名单"""
+        if os.path.exists("blacklist.txt"):
+            with open("blacklist.txt", "r", encoding="utf-8") as f:
+                for line in f:
+                    self.blacklist.add(line.strip())
+            print(f"🛡️ 已加载 {len(self.blacklist)} 个黑名单规则")
+
+    async def add_to_blacklist(self, url):
+        """添加 URL 到黑名单（内存+文件）"""
+        if url not in self.blacklist:
+            self.blacklist.add(url)
+            self.stats['blacklisted'] += 1
+            # 异步写入文件，防止阻塞
+            async with aiofiles.open("blacklist.txt", "a", encoding="utf-8") as f:
+                await f.write(url + "\n")
+            logging.warning(f"🚫 [已拉黑] {url}")
 
     async def start(self):
         print(f"🚀 启动混合动力爬虫 (aiohttp + Playwright) | 目标: {ROOT_DOMAIN}")
@@ -298,6 +317,14 @@ class UnifiedCrawler:
             try:
                 url = await self.queue.get()
 
+                # ============================================================
+                # 🛑 [Upgrade 1] Pre-flight Check: Blacklist
+                # If the URL is already in the blacklist, skip it immediately.
+                # ============================================================
+                if url in self.blacklist:
+                    self.queue.task_done()
+                    continue
+
                 # Prepare request headers and proxy
                 headers = self.middleware.get_random_header()
                 proxy = self.middleware.get_random_proxy()
@@ -310,32 +337,67 @@ class UnifiedCrawler:
                 
                 html_text = ""
                 
+                # --- Execution Path A: Playwright (Heavy) ---
                 if use_playwright:
-                    # Use Playwright for dynamic pages
                     html_text = await self.pw_manager.fetch_page(url)
+                    # If Playwright returns None (failed rendering), we might consider blacklisting it
+                    if html_text is None:
+                        # Optional: aggressive blacklisting on render failure
+                        pass
+
+                # --- Execution Path B: Aiohttp (Fast) ---
                 else:
                     try:
-                        # aiohttp request with randomized headers and optional proxy
                         # ssl=False helps avoid some proxy-related certificate issues
-                        async with session.get(url, headers=headers, proxy=proxy, timeout=10, ssl=False) as response:
+                        async with session.get(url, headers=headers, proxy=proxy, timeout=15, ssl=False) as response:
                             if response.status == 200:
                                 html_text = await response.text()
-                            elif response.status in [403, 429]:
-                                logging.warning(f"🚫 [被封锁] {response.status} - {url} (IP: {proxy})")
-                                # 被封了就把任务放回队列重试（下次会换个IP）
+
+                            # ============================================================
+                            # 🚫 [Upgrade 2] Punishment Logic: Permanent Ban
+                            # 401/403: Forbidden (IP ban or Login required)
+                            # 404: Not Found (Dead link)
+                            # ============================================================
+                            elif response.status in [401, 403, 404]:
+                                logging.warning(f"🚫 [Auto-Blacklist] Status {response.status} - {url}")
+                                await self.add_to_blacklist(url)
+                            
+                            # ============================================================
+                            # ⏳ [Upgrade 3] Retry Logic: Temporary Ban
+                            # 429: Too Many Requests (Rate Limited) -> Put back in queue
+                            # ============================================================
+                            elif response.status == 429:
+                                logging.warning(f"⏳ [Rate Limit] 429 - {url} (Retrying later...)")
                                 self.queue.put_nowait(url) 
-                    except Exception:
+
+                    except Exception as e:
+                        # Network errors (timeout, connection reset) are not necessarily blacklist-worthy
+                        # We just skip them for now
                         pass
                 
-                # Fallback: if static fetch returns too little content, retry with Playwright
+                # --- Fallback Logic ---
+                # If static fetch returns too little content (e.g. < 500 chars), it might be JS-protected.
+                # Retry with Playwright.
                 if not use_playwright and (not html_text or len(html_text) < 500):
+                     # logging.info(f"⚠️ [Fallback] Static content too short, switching to Playwright: {url}")
                      html_text = await self.pw_manager.fetch_page(url)
 
-                if html_text:
+                # ============================================================
+                # ✅ [Upgrade 4] Final Validation & Storage
+                # ============================================================
+                if html_text and len(html_text) > 100:
                     await self.process_html(html_text, url)
+                else:
+                    # If it's STILL empty after Fallback, it's likely a broken/empty page.
+                    # We can choose to blacklist it to save future resources.
+                    if html_text is not None: # Only blacklist if we actually got a response (empty string)
+                        # logging.warning(f"🗑️ [Empty Page] Blacklisting {url}")
+                        # await self.add_to_blacklist(url)
+                        pass
 
                 await asyncio.sleep(0.5)
                 self.queue.task_done()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:

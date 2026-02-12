@@ -2,6 +2,7 @@ import os
 import shutil
 import logging
 from transformers import pipeline
+import re
 
 # ================= 终极配置：覆盖几乎所有大学场景 =================
 # reorganize_ai.py
@@ -166,6 +167,75 @@ class AIClassifier:
         confidence = result['scores'][0]
         
         return top_label, confidence
+def add_to_blacklist(url):
+    """同步写入黑名单"""
+    if not url: return
+    try:
+        with open("blacklist.txt", "a", encoding="utf-8") as f:
+            f.write(url + "\n")
+        print(f"🚫 URL 已加入黑名单: {url}")
+    except Exception as e:
+        print(f"⚠️ 黑名单写入失败: {e}")
+
+def extract_url_from_markdown(content):
+    """从 Markdown 元数据中提取 URL"""
+    # 匹配 > URL: https://...
+    match = re.search(r'> URL: (.*)', content)
+    if match:
+        return match.group(1).strip()
+    return None
+
+def process_files_smartly():
+    # ... (前面的代码不变) ...
+    
+    for filename in files:
+        file_path = os.path.join(TARGET_DIR, filename)
+        
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # --- 修改开始 ---
+            
+            # 1. 基础过滤：如果内容太短 -> 拉黑 + 删除
+            if len(content) < 150:
+                print(f"🗑️ [过短] {filename}")
+                url = extract_url_from_markdown(content) # 提取 URL
+                add_to_blacklist(url)                    # 拉黑
+                os.remove(file_path)                     # 删除
+                stats["deleted"] += 1
+                continue
+
+            # 2. AI 判决
+            label, score = ai.classify(content)
+            folder_name = LABEL_TO_DIR[label]
+            
+            if folder_name == "trash":
+                print(f"🗑️ [AI判定垃圾] {filename} (置信度: {score:.2f})")
+                url = extract_url_from_markdown(content) # 提取 URL
+                add_to_blacklist(url)                    # 拉黑
+                os.remove(file_path)                     # 删除
+                stats["deleted"] += 1
+        except Exception as e:
+            print(f"⚠️ 处理出错 {filename}: {e}")
+
+def add_to_blacklist(url):
+    """同步写入黑名单"""
+    if not url: return
+    try:
+        with open("blacklist.txt", "a", encoding="utf-8") as f:
+            f.write(url + "\n")
+        print(f"🚫 URL 已加入黑名单: {url}")
+    except Exception as e:
+        print(f"⚠️ 黑名单写入失败: {e}")
+
+def extract_url_from_markdown(content):
+    """从 Markdown 元数据中提取 URL"""
+    # 匹配 > URL: https://...
+    match = re.search(r'> URL: (.*)', content)
+    if match:
+        return match.group(1).strip()
+    return None
 
 def process_files_smartly():
     if not os.path.exists(TARGET_DIR):
@@ -185,10 +255,14 @@ def process_files_smartly():
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
-            # 1. 基础过滤：如果内容太短，AI 也没法看，直接扔
+            # --- 修改开始 ---
+            
+            # 1. 基础过滤：如果内容太短 -> 拉黑 + 删除
             if len(content) < 150:
                 print(f"🗑️ [过短] {filename}")
-                os.remove(file_path)
+                url = extract_url_from_markdown(content) # 提取 URL
+                add_to_blacklist(url)                    # 拉黑
+                os.remove(file_path)                     # 删除
                 stats["deleted"] += 1
                 continue
 
@@ -196,10 +270,11 @@ def process_files_smartly():
             label, score = ai.classify(content)
             folder_name = LABEL_TO_DIR[label]
             
-            # 3. 决策逻辑
             if folder_name == "trash":
-                print(f"🗑️ [AI判定无效] {filename} (置信度: {score:.2f})")
-                os.remove(file_path)
+                print(f"🗑️ [AI判定垃圾] {filename} (置信度: {score:.2f})")
+                url = extract_url_from_markdown(content) # 提取 URL
+                add_to_blacklist(url)                    # 拉黑
+                os.remove(file_path)                     # 删除
                 stats["deleted"] += 1
             
             elif score > 0.4: # 置信度阈值，你可以根据效果调整
