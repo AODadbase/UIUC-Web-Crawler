@@ -8,7 +8,7 @@ import hashlib
 import trafilatura
 from urllib.parse import urlparse, urljoin
 from datetime import datetime
-from database import DBManager
+from database import StorageManager
 from middleware import RequestMiddleware
 # Playwright integration for handling dynamic pages
 from playwright.async_api import async_playwright
@@ -61,24 +61,31 @@ class PlaywrightManager:
         # Create a context bound to the chosen user agent and proxy
         context = await self.browser.new_context(
             user_agent=ua,
-            proxy=proxy, # None is ignored by Playwright
+            proxy=proxy, 
             viewport={'width': 1920, 'height': 1080}
         )
         
         page = await context.new_page()
         try:
-            await page.goto(url, timeout=30000, wait_until="networkidle")
+            # 1. 缩短超时到 15秒 (15000ms)，避免傻等
+            # wait_until="domcontentloaded" 比 networkidle 更快，它不等图片完全加载完
+            await page.goto(url, timeout=15000, wait_until="domcontentloaded")
             
-            # TODO: apply INTERACTION_RULES here if active clicking is required
+            # 2. [新增] 强制等待 1-2 秒，让 JS 有机会渲染文字
+            await page.wait_for_timeout(1500) 
+            
+            # 3. [新增] 模拟滚动到底部 (触发 Lazy Load 内容)
+            # 很多 UIUC 的课程列表只有滚下去才会显示
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            await page.wait_for_timeout(1000) # 滚完再等 1 秒
             
             content = await page.content()
             return content
         except Exception as e:
-            # logging.error(...)
+            # logging.error(f"Playwright fetch failed: {e}")
             return None
         finally:
             await page.close()
-            # Always close context to free associated resources
             await context.close()
     
 
@@ -230,7 +237,6 @@ class UnifiedCrawler:
         self.queue = asyncio.Queue()
         self.visited = set()
         self.storage = StorageManager(DATA_DIR)
-        self.db = DBManager()
         self.middleware = RequestMiddleware()
         self.pw_manager = PlaywrightManager(self.middleware)
         self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0, "blacklisted": 0}
@@ -272,7 +278,7 @@ class UnifiedCrawler:
             
         # Shut down Playwright browser engine
         await self.pw_manager.stop()
-        self.db.close()
+        self.storage.close()
         
         print("\n" + "="*40)
         print("Crawl completed")
@@ -286,23 +292,54 @@ class UnifiedCrawler:
     async def inject_subdomains(self, session):
         """Seed the crawler with subdomains discovered from crt.sh or fallbacks."""
         print("[Phase 1] Discovering subdomains...")
+        
+        # ⛔️ [关键修改] 垃圾子域名黑名单
+        # 这些词如果出现在子域名里，直接不要，防止爬虫卡死在内网登录页
+        IGNORED_SUBS = [
+            "auth", "login", "sso", "shibboleth", "vpn", "mail", "email", 
+            "outlook", "exchange", "kronos", "canvas", "compass", "moodle", 
+            "test", "dev", "stage", "staging", "demo", "admin", "intranet",
+            "printing", "calendar", "directory", "files", "ftp", "remote",
+            "cites", "help", "support", "status"
+        ]
+
         crt_success = False
         try:
+            # ✅ [关键修改] 超时设为 10秒，别傻等
             url = f"https://crt.sh/?q=%.{ROOT_DOMAIN}&output=json"
-            async with session.get(url, timeout=30) as resp:
+            async with session.get(url, timeout=10) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     for entry in data:
                         sub = entry['name_value'].split('\n')[0].replace('*.', '')
-                        if sub.endswith(ROOT_DOMAIN):
+                        
+                        # --- 过滤逻辑开始 ---
+                        should_skip = False
+                        for bad_word in IGNORED_SUBS:
+                            if bad_word in sub:
+                                should_skip = True
+                                break
+                        # --- 过滤逻辑结束 ---
+
+                        if not should_skip and sub.endswith(ROOT_DOMAIN):
                             full_url = f"https://{sub}"
                             if full_url not in self.visited:
                                 self.queue.put_nowait(full_url)
                                 self.visited.add(full_url)
+                    
                     crt_success = True
-                    print("Seeded subdomains from crt.sh")
-        except:
+                    print("✅ Seeded subdomains from crt.sh (Filtered)")
+        except Exception as e:
+            print(f"⚠️ crt.sh failed: {e}")
             pass
+
+        if not crt_success or self.queue.qsize() == 0:
+            print("Using fallback seed URLs")
+            seeds = [f"https://www.{ROOT_DOMAIN}", f"https://housing.{ROOT_DOMAIN}", f"https://academics.{ROOT_DOMAIN}", f"https://cs.{ROOT_DOMAIN}"]
+            for seed in seeds:
+                if seed not in self.visited:
+                    self.queue.put_nowait(seed)
+                    self.visited.add(seed)
 
         if not crt_success or self.queue.qsize() == 0:
             print("Using fallback seed URLs")
@@ -349,7 +386,7 @@ class UnifiedCrawler:
                 else:
                     try:
                         # ssl=False helps avoid some proxy-related certificate issues
-                        async with session.get(url, headers=headers, proxy=proxy, timeout=15, ssl=False) as response:
+                        async with session.get(url, headers=headers, proxy=proxy, timeout=3, ssl=False) as response:
                             if response.status == 200:
                                 html_text = await response.text()
 
@@ -412,12 +449,12 @@ class UnifiedCrawler:
         if not data: return 
 
         content_hash = hashlib.md5(data['content'].encode('utf-8')).hexdigest()
-        should_save, status = self.db.should_process(url, content_hash)
+        should_save, status = self.storage.should_process(url, content_hash)
         category = self.storage.classify(url, data['title'] + " " + data['content'])
 
         if should_save:
             await self.storage.save_data(data, category)
-            self.db.upsert_page(url, content_hash, category, data['title'])
+            self.storage.upsert_page(url, content_hash, category, data['title'])
             if status == "NEW":
                 self.stats['new'] += 1
                 logging.info(f"✅ [NEW] {data['title'][:20]}...")
@@ -440,7 +477,7 @@ class UnifiedCrawler:
     async def prune_stale_content(self, session):
         """Check previously seen URLs and remove content that no longer exists."""
         print("\n[Phase 3] Pruning stale content...")
-        all_records = self.db.get_all_urls()
+        all_records = self.storage.get_all_urls()
         suspects = []
         for row in all_records:
             url, category, title = row
@@ -453,7 +490,7 @@ class UnifiedCrawler:
                     if resp.status == 404 or resp.status == 410:
                         logging.warning(f"❌ [Stale] {title} -> deleted")
                         await self.storage.delete_data(url, category)
-                        self.db.delete_page(url)
+                        self.storage.delete_page(url)
                         self.stats['deleted'] += 1
             except:
                 pass

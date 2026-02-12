@@ -1,16 +1,34 @@
 #!/bin/bash
 
-# Define Python path inside the virtual environment
 PYTHON_CMD="./.venv/bin/python"
 
-echo "Phase 1: starting high-speed crawler..."
+echo "==========================================="
+echo "🚀 PHASE 1: HIGH-SPEED CRAWLING (Python)"
+echo "   Appending raw data to raw_crawl.jsonl..."
+echo "==========================================="
+# 确保 main.py 里的 log_mode=True 已经生效
 $PYTHON_CMD main.py
 
-echo "--------------------------------"
-echo "Crawling finished. Sleeping for 3 seconds..."
-sleep 3
+echo ""
+echo "==========================================="
+echo "⚙️ PHASE 2: C++ HIGH-PERFORMANCE RESOLVER"
+echo "   Compiling and processing data..."
+echo "==========================================="
 
-echo "Phase 2: starting AI-based reorganization..."
+# 1. 编译 C++ 工具
+cd cpp_optimizer
+make
+cd ..
+
+# 2. 运行 C++ 工具生成 Markdown
+./cpp_optimizer/log_resolver
+
+echo ""
+echo "==========================================="
+echo "🧠 PHASE 3: AI CLASSIFICATION (Python)"
+echo "   Organizing files..."
+echo "==========================================="
 $PYTHON_CMD reorganize_ai.py
 
-echo "✅ All tasks completed. Knowledge base has been updated."
+echo ""
+echo "🎉 PIPELINE COMPLETE!"
