@@ -13,4 +13,4 @@ sleep 3
 echo "Phase 2: starting AI-based reorganization..."
 $PYTHON_CMD reorganize_ai.py
 
-echo "All tasks completed. Knowledge base has been updated."
+echo "✅ All tasks completed. Knowledge base has been updated."

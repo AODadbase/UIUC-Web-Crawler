@@ -32,9 +32,9 @@ class RequestMiddleware:
                             line = f"http://{line}"
                         self.proxies.append(line)
             if self.proxies:
-                logging.info(f"Loaded {len(self.proxies)} proxy endpoints")
+                logging.info(f"✅ Loaded {len(self.proxies)} proxy endpoints")
         except FileNotFoundError:
-            logging.warning("proxies.txt not found; using direct connections without proxies")
+            logging.warning("⚠️ proxies.txt not found; using direct connections without proxies")
 
     def get_random_header(self):
         """Return HTTP headers with a randomized User-Agent."""

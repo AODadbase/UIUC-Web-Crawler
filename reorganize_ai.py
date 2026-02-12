@@ -144,7 +144,7 @@ logging.basicConfig(level=logging.INFO)
 
 class AIClassifier:
     def __init__(self):
-        print("Loading zero-shot classification model (facebook/bart-large-mnli)... This may take a moment.")
+        print("✅ Loading zero-shot classification model (facebook/bart-large-mnli)... This may take a moment.")
         # Use a zero-shot classification pipeline
         # Classifies text into labels without task-specific training data
         self.classifier = pipeline("zero-shot-classification", model="facebook/bart-large-mnli")
@@ -171,9 +171,9 @@ def add_to_blacklist(url):
     try:
         with open("blacklist.txt", "a", encoding="utf-8") as f:
             f.write(url + "\n")
-        print(f"URL added to blacklist: {url}")
+        print(f"⚠️ URL added to blacklist: {url}")
     except Exception as e:
-        print(f"Failed to update blacklist: {e}")
+        print(f"❌ Failed to update blacklist: {e}")
 
 def extract_url_from_markdown(content):
     """Extract URL from Markdown metadata"""
@@ -197,7 +197,7 @@ def process_files_smartly():
             
             # 1. Basic length filter: blacklist and delete very short content
             if len(content) < 150:
-                print(f"[Too short] {filename}")
+                print(f"⚠️ [Too short] {filename}")
                 url = extract_url_from_markdown(content) # Extract URL
                 add_to_blacklist(url)                    # Blacklist URL
                 os.remove(file_path)                     # Delete file
@@ -209,7 +209,7 @@ def process_files_smartly():
             folder_name = LABEL_TO_DIR[label]
             
             if folder_name == "trash":
-                print(f"[Classified as trash] {filename} (confidence: {score:.2f})")
+                print(f"❌ [Classified as trash] {filename} (confidence: {score:.2f})")
                 url = extract_url_from_markdown(content) # Extract URL
                 add_to_blacklist(url)                    # Blacklist URL
                 os.remove(file_path)                     # Delete file
@@ -224,9 +224,9 @@ def add_to_blacklist(url):
     try:
         with open("blacklist.txt", "a", encoding="utf-8") as f:
             f.write(url + "\n")
-        print(f"URL added to blacklist: {url}")
+        print(f"⚠️ URL added to blacklist: {url}")
     except Exception as e:
-        print(f"Failed to update blacklist: {e}")
+        print(f"❌ Failed to update blacklist: {e}")
 
 def extract_url_from_markdown(content):
     """Extract URL from Markdown metadata"""
@@ -243,7 +243,7 @@ def process_files_smartly():
 
     ai = AIClassifier()
     files = [f for f in os.listdir(TARGET_DIR) if f.endswith(".md")]
-    print(f"AI classifier is ready. Reviewing {len(files)} files...\n")
+    print(f"✅ AI classifier is ready. Reviewing {len(files)} files...\n")
 
     stats = {"moved": 0, "deleted": 0, "uncertain": 0}
 
@@ -256,7 +256,7 @@ def process_files_smartly():
             
             # 1. Basic length filter: blacklist and delete very short content
             if len(content) < 150:
-                print(f"[Too short] {filename}")
+                print(f"⚠️ [Too short] {filename}")
                 url = extract_url_from_markdown(content) # Extract URL
                 add_to_blacklist(url)                    # Blacklist URL
                 os.remove(file_path)                     # Delete file
@@ -268,7 +268,7 @@ def process_files_smartly():
             folder_name = LABEL_TO_DIR[label]
             
             if folder_name == "trash":
-                print(f"[Classified as trash] {filename} (confidence: {score:.2f})")
+                print(f"❌ [Classified as trash] {filename} (confidence: {score:.2f})")
                 url = extract_url_from_markdown(content) # Extract URL
                 add_to_blacklist(url)                    # Blacklist URL
                 os.remove(file_path)                     # Delete file
@@ -282,17 +282,17 @@ def process_files_smartly():
                 new_path = os.path.join(target_dir, filename)
                 shutil.move(file_path, new_path)
                 
-                print(f"[{folder_name.upper()}] {filename} (confidence: {score:.2f})")
+                print(f"✅ [{folder_name.upper()}] {filename} (confidence: {score:.2f})")
                 stats["moved"] += 1
             else:
-                print(f"[Uncertain] {filename} (top match: {label}, {score:.2f}) -> left in place")
+                print(f"⚠️ [Uncertain] {filename} (top match: {label}, {score:.2f}) -> left in place")
                 stats["uncertain"] += 1
 
         except Exception as e:
             print(f"Error processing {filename}: {e}")
 
     print("\n" + "="*30)
-    print("AI classification complete")
+    print("✅ AI classification complete")
     print(f"Classified files: {stats['moved']}")
     print(f"Deleted as trash: {stats['deleted']}")
     print(f"Still uncertain: {stats['uncertain']}")

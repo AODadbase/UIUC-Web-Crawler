@@ -255,7 +255,7 @@ class UnifiedCrawler:
             # Asynchronously append to file to avoid blocking
             async with aiofiles.open("blacklist.txt", "a", encoding="utf-8") as f:
                 await f.write(url + "\n")
-            logging.warning(f"[Blacklisted] {url}")
+            logging.warning(f"⚠️ [Blacklisted] {url}")
 
     async def start(self):
         print(f"Starting hybrid crawler (aiohttp + Playwright). Target domain: {ROOT_DOMAIN}")
@@ -359,7 +359,7 @@ class UnifiedCrawler:
                             # 404: Not Found (dead link)
                             # ============================================================
                             elif response.status in [401, 403, 404]:
-                                logging.warning(f"[Auto-blacklist] Status {response.status} - {url}")
+                                logging.warning(f"⚠️ [Auto-blacklist] Status {response.status} - {url}")
                                 await self.add_to_blacklist(url)
                             
                             # ============================================================
@@ -367,7 +367,7 @@ class UnifiedCrawler:
                             # 429: Too Many Requests (rate limited) -> put back in queue
                             # ============================================================
                             elif response.status == 429:
-                                logging.warning(f"[Rate limit] 429 - {url} (retrying later)")
+                                logging.warning(f"⚠️ [Rate limit] 429 - {url} (retrying later)")
                                 self.queue.put_nowait(url) 
 
                     except Exception as e:
@@ -420,10 +420,10 @@ class UnifiedCrawler:
             self.db.upsert_page(url, content_hash, category, data['title'])
             if status == "NEW":
                 self.stats['new'] += 1
-                logging.info(f"[NEW] {data['title'][:20]}...")
+                logging.info(f"✅ [NEW] {data['title'][:20]}...")
             else:
                 self.stats['updated'] += 1
-                logging.info(f"[UPDATED] {data['title'][:20]}...")
+                logging.info(f"✅ [UPDATED] {data['title'][:20]}...")
         else:
             self.stats['skipped'] += 1
 
@@ -439,19 +439,19 @@ class UnifiedCrawler:
 
     async def prune_stale_content(self, session):
         """Check previously seen URLs and remove content that no longer exists."""
-        print("\n🧹 [Phase 3] 开始清理过期内容...")
+        print("\n[Phase 3] Pruning stale content...")
         all_records = self.db.get_all_urls()
         suspects = []
         for row in all_records:
             url, category, title = row
             if url not in self.visited:
                 suspects.append((url, category, title))
-        print(f"🔍 发现 {len(suspects)} 个未访问页面，正在验证...")
+        print(f"⚠️ Found {len(suspects)} previously seen pages not visited in this run. Verifying...")
         for url, category, title in suspects:
             try:
                 async with session.head(url, timeout=5, allow_redirects=True) as resp:
                     if resp.status == 404 or resp.status == 410:
-                        logging.warning(f"❌ [已失效] {title} -> 删除...")
+                        logging.warning(f"❌ [Stale] {title} -> deleted")
                         await self.storage.delete_data(url, category)
                         self.db.delete_page(url)
                         self.stats['deleted'] += 1
