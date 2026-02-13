@@ -9,37 +9,37 @@ A production-grade, full-cycle web crawler designed to build a comprehensive kno
 * **Resilience**: Features automatic retries, `crt.sh` subdomain discovery, and fallback strategies.
 * **Stealth**: Built-in middleware for User-Agent rotation and Proxy integration.
 
-### 2. Intelligent Data Processing
-* **Smart Extraction**: Uses `Trafilatura` to algorithmically extract main content, removing ads, navigation bars, and boilerplate noise.
-* **Zero-Shot AI Classification**: Utilizes a pre-trained NLI model (BART) to semantically categorize pages into specific domains (e.g., *Faculty Profiles, Course Syllabi, Research Labs*) with high precision.
+### 2. Incremental Crawling & Resumability
+* **Content Hashing**: Tracks page content via MD5 hashes in `crawl_state.json`. Only new or changed pages are re-crawled.
+* **Ctrl+C Safe**: Signal handlers ensure state is always saved on interrupt. Resume exactly where you left off.
+* **Periodic Checkpointing**: State is flushed to disk every 10 pages, minimizing data loss on crash.
+* **Auto-Pruning**: Detects and removes stale content (404/410) and cleans up old `.md` files.
+* **Global Blacklist**: Persistent `blacklist.txt` skips known dead, forbidden, or login-only URLs.
 
-### 3. C++ Optimizer Pipeline
+### 3. Keyword Classification at Crawl Time
+* Pages are classified into 24 category folders during crawling using keyword scoring.
+* Categories include: `academics`, `housing`, `financial`, `career`, `research`, `isss`, `admissions`, `athletics`, `health`, `safety`, and more.
+* When a page's content changes and its category shifts, the old `.md` file is automatically deleted and the new one placed in the correct folder.
+
+### 4. C++ Optimizer Pipeline
 High-performance analysis tools written in multithreaded C++17:
-* **PageRank** (`pagerank`): Computes page importance scores via parallel PageRank iteration with early convergence detection. Results saved to `pagerank_results.txt` for downstream use.
-* **Log Resolver** (`log_resolver`): Converts raw JSONL crawl logs into structured Markdown files with **YAML frontmatter injection**. Reads PageRank scores and embeds them as metadata (e.g., `pagerank_score: 3.452`, `priority: high`) for AI-ready retrieval.
-* **SimHash** (`simhash`): Detects near-duplicate pages using 64-bit SimHash fingerprints and Hamming distance comparison. Results saved to `simhash_results.txt`.
-* **Inverted Index** (`inverted_index`): Builds a parallel inverted index for full-text search with per-word URL deduplication. Results saved to `inverted_index.txt`.
+* **PageRank** (`pagerank`): Computes page importance scores via parallel PageRank iteration.
+* **Log Resolver** (`log_resolver`): Converts raw JSONL into structured Markdown with YAML frontmatter, using the category from Python and injecting PageRank scores.
+* **SimHash** (`simhash`): Detects near-duplicate pages using 64-bit SimHash fingerprints.
+* **Inverted Index** (`inverted_index`): Builds a parallel inverted index for full-text search.
 
-**Why This Matters for AI/RAG:**  
-The Markdown files produced by `log_resolver` include structured metadata that enables:
-- **Tiered Retrieval**: Query only high-authority pages first (`pagerank_score > 5.0`)
-- **Authority Weighting**: Pass scores to LLMs as confidence signals during RAG
-- **Deduplication**: Use SimHash fingerprints to avoid retrieving redundant content
-
-### 4. Lifecycle Management
-* **Incremental Updates**: Uses SQLite (WAL mode) and content hashing (via `database.py` / `StorageManager`) to track changes, ensuring only new or updated pages are processed.
-* **Auto-Pruning**: Automatically detects and removes stale content (404/410) to maintain data integrity.
-* **Global Blacklist**: Maintains a persistent `blacklist.txt` file and skips URLs that are known to be login-only, forbidden, or dead.
+### 5. AI Reorganization (Fallback)
+* `reorganize_ai.py` uses zero-shot BART classification to handle any pages that couldn't be confidently categorized by keyword matching (left in `uncategorized/`).
 
 ## Tech Stack
 
 * **Core**: Python 3.10+, C++17
 * **Network**: `aiohttp`, `Playwright`
 * **AI/NLP**: `Transformers` (Hugging Face), `Trafilatura`
-* **Storage**: `SQLite` (WAL mode), `aiofiles`
+* **State**: `crawl_state.json` (flat file, no database)
 * **Build**: `g++` with `-std=c++17 -O3 -Wall -pthread`
 
-## Installation & Requirements
+## Installation
 
 1.  Clone the repository:
     ```bash
@@ -47,10 +47,10 @@ The Markdown files produced by `log_resolver` include structured metadata that e
     cd UIUC-Crawler
     ```
 
-2.  Create and activate a virtual environment (Python 3.10+ recommended):
+2.  Create and activate a virtual environment (Python 3.10+):
     ```bash
     python -m venv .venv
-    source .venv/bin/activate  # Windows: .venv\Scripts\activate
+    source .venv/bin/activate
     ```
 
 3.  Install Python dependencies:
@@ -59,36 +59,31 @@ The Markdown files produced by `log_resolver` include structured metadata that e
     playwright install chromium
     ```
 
-4.  Build the C++ optimizers (requires `g++` with C++17 support):
+4.  Build the C++ optimizers:
     ```bash
-    cd cpp_optimizer
-    make
-    cd ..
+    cd cpp_optimizer && make && cd ..
     ```
 
 ## Usage
 
-### One-Click Run (Recommended)
-Runs the full pipeline: crawl, C++ analysis, then AI classification.
-
+### Full Pipeline (Recommended)
 ```bash
 chmod +x run_all.sh
 ./run_all.sh
 ```
 
-The pipeline executes three phases:
-1. **Crawl** — `main.py` discovers subdomains and crawls pages into `raw_crawl.jsonl`
-2. **C++ Analysis & Enrichment**:
-   - `pagerank` computes authority scores → `pagerank_results.txt`
-   - `log_resolver` generates Markdown **with embedded PageRank metadata** as YAML frontmatter
-3. **AI Reorganization** — `reorganize_ai.py` classifies uncategorized pages into topic folders
+The pipeline executes:
+1. **Crawl** -- `main.py` discovers subdomains, crawls pages, classifies them, writes `raw_crawl.jsonl`
+2. **Validate** -- `validate_jsonl.py` strips malformed lines
+3. **C++ Analysis** -- PageRank computes scores, Log Resolver generates `.md` files into category folders with PageRank metadata
+4. **AI Cleanup** -- `reorganize_ai.py` classifies any remaining `uncategorized/` pages
 
-**Output Example** (generated Markdown with metadata):
+**Output Example** (generated Markdown):
 ```markdown
 ---
 url: https://admissions.illinois.edu/
 title: Undergraduate Admissions
-category: uncategorized
+category: admissions
 pagerank_score: 8.342156
 priority: high
 ---
@@ -99,36 +94,60 @@ priority: high
 ```
 
 ### Run Individual Components
-
 ```bash
-# Crawl only
+# Crawl only (safe to Ctrl+C, state is saved)
 python main.py
 
-# Build and run C++ analyzers only
+# Build and run C++ analyzers
 cd cpp_optimizer && make && cd ..
-./cpp_optimizer/log_resolver
-./cpp_optimizer/pagerank
-./cpp_optimizer/simhash
-./cpp_optimizer/inverted_index
+./build/pagerank
+./build/log_resolver
 
 # AI reorganization only
 python reorganize_ai.py
 ```
 
+## Data Flow
+
+```
+Python Crawler (main.py)
+     |  classifies pages, writes JSONL with category
+     v
+raw_crawl.jsonl
+     |
+     v
+C++ PageRank --> pagerank_results.txt
+     |
+     v
+C++ Log Resolver --> uiuc_knowledge_base/{category}/*.md
+     |                (with YAML frontmatter + PageRank scores)
+     v
+AI Reorganizer --> moves uncategorized/ leftovers into proper folders
+```
+
+## State Files
+
+| File | Purpose | Persists across runs |
+|------|---------|---------------------|
+| `crawl_state.json` | URL-to-hash map for incremental crawling | Yes |
+| `raw_crawl.jsonl` | Current run's new/updated pages (truncated each run) | No |
+| `blacklist.txt` | URLs to permanently skip | Yes |
+
 ## Project Structure
 ```text
 ├── main.py                # Entry point & hybrid crawler logic
-├── database.py            # StorageManager: SQLite state + Markdown persistence
+├── database.py            # StorageManager: JSON state + JSONL logging + classification
 ├── middleware.py           # Proxy & User-Agent rotation
-├── reorganize_ai.py       # Zero-shot AI classification & folder reorganization
+├── reorganize_ai.py       # Zero-shot AI classification (fallback for uncategorized)
+├── validate_jsonl.py      # JSONL validation before C++ processing
 ├── run_all.sh             # Full pipeline automation script
 ├── blacklist.txt          # Persistent URL blacklist
 ├── requirements.txt       # Python dependencies
 ├── cpp_optimizer/
 │   ├── Makefile           # Build configuration (C++17, -O3, -Wall)
-│   ├── log_resolver.cpp   # JSONL → Markdown converter (multithreaded)
+│   ├── log_resolver.cpp   # JSONL -> Markdown converter (reads category from JSONL)
 │   ├── pagerank.cpp       # Parallel PageRank with convergence detection
 │   ├── simhash.cpp        # Near-duplicate detection via SimHash
 │   └── invert_index.cpp   # Parallel inverted index builder
-└── uiuc_knowledge_base/   # [Output] Structured data (ignored by Git)
+└── uiuc_knowledge_base/   # [Output] Categorized Markdown files (gitignored)
 ```

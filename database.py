@@ -1,217 +1,285 @@
-import sqlite3
-import logging
 import json
+import logging
 import os
-import hashlib
-import aiofiles  # Async file I/O library
+import aiofiles
 from datetime import datetime
 
+CATEGORIES = {
+    "people": [
+        "professor", "faculty", "staff", "phd", "instructor", "lecturer",
+        "directory", "profile", "postdoc", "candidate", "dean", "chair"
+    ],
+    "academics": [
+        "course", "syllabus", "curriculum", "major", "minor", "degree",
+        "gpa", "credit", "catalog", "class", "registrar"
+    ],
+    "housing": [
+        "housing", "dorm", "residence", "hall", "apartment", "lease",
+        "dining", "roommate"
+    ],
+    "financial": [
+        "scholarship", "tuition", "aid", "grant", "loan", "cost", "fee", "bursar"
+    ],
+    "career": [
+        "career", "internship", "job", "resume", "handshake", "recruiting"
+    ],
+    "research": [
+        "research", "lab", "publication", "thesis", "citation"
+    ],
+    "library": [
+        "library", "collection", "borrow", "archive"
+    ],
+    "events": [
+        "event", "calendar", "schedule", "workshop", "seminar"
+    ],
+    "policies": [
+        "policy", "regulation", "code", "conduct", "privacy"
+    ],
+    "about": [
+        "about", "history", "mission", "contact"
+    ],
+    "news": [
+        "news", "blog", "story"
+    ],
+    "isss": [
+        "isss", "international student", "international students",
+        "international office", "international services", "immigration",
+        "visa", "visas", "sevis", "i-20", "i20", "ds-2019", "ds2019",
+        "f-1", "f1", "j-1", "j1", "opt", "cpt", "stem opt",
+        "optional practical training", "curricular practical training",
+        "international scholar", "exchange visitor"
+    ],
+    "admissions": [
+        "admission", "admissions", "apply", "application", "applicant",
+        "deadline", "deadlines", "required documents", "requirements",
+        "test score", "test scores", "sat", "act", "toefl", "ielts",
+        "gre", "gmat", "transfer", "transfer student", "readmission",
+        "deferral", "defer", "prospective student"
+    ],
+    "student_support": [
+        "orientation", "new student", "welcome days", "welcome week",
+        "student success", "success program", "tutoring", "tutor",
+        "advising", "advisor", "academic advising", "writing center",
+        "first-gen", "first generation", "mentoring", "mentor", "coaching"
+    ],
+    "student_life": [
+        "student life", "student organization", "student organizations",
+        "club", "clubs", "rso", "registered student organization",
+        "campus recreation", "rec center", "student government",
+        "leadership program", "volunteer", "volunteering", "service project"
+    ],
+    "athletics": [
+        "athletic", "athletics", "sport", "sports", "varsity",
+        "intramural", "intramurals", "gym", "fitness", "workout",
+        "recreation", "stadium", "arena", "pool"
+    ],
+    "accessibility": [
+        "disability", "dres", "accessible", "accessibility",
+        "accommodation", "accommodations", "assistive", "wheelchair",
+        "exam accommodation", "testing accommodation"
+    ],
+    "diversity": [
+        "diversity", "equity", "inclusion", "inclusive", "dei",
+        "bias report", "bias incident", "cultural center",
+        "cultural centers", "lgbt", "lgbtq"
+    ],
+    "alumni": [
+        "alumni", "alumnus", "alumna", "alumnae", "alumni association",
+        "alumni network", "giving", "give", "donor", "donors",
+        "fundraising", "advancement", "development office",
+        "homecoming", "alumni event", "alumni events"
+    ],
+    "campus_services": [
+        "id card", "i-card", "icard", "campus card", "printing",
+        "printer", "copying", "mail", "mailroom", "package", "packages",
+        "campus store", "bookstore", "lost and found", "lost & found"
+    ],
+    "transportation": [
+        "parking", "transportation", "bus", "shuttle", "transit", "commute"
+    ],
+    "health": [
+        "health", "wellness", "counseling", "mental health", "immunization",
+        "vaccination", "clinic", "medical"
+    ],
+    "safety": [
+        "safety", "police", "emergency", "campus safety", "security"
+    ],
+    "it_services": [
+        "it support", "software", "technology services", "netid", "vpn",
+        "wifi", "network", "computer lab"
+    ],
+}
+
+CHECKPOINT_INTERVAL = 10  # Save state to disk every N pages
+
+
+BASE_DIR = "uiuc_knowledge_base"
+
+
+def sanitize_filename(url):
+    """Convert a URL into a safe filename (must match C++ sanitize_filename)."""
+    name = url
+    for c in "://.":
+        name = name.replace(c, "_")
+    if len(name) > 100:
+        name = name[:100]
+    return name + ".md"
+
+
 class StorageManager:
-    def __init__(self, base_dir, db_path="crawler_state.db", log_mode=False):
-        self.base_dir = base_dir
-        self.log_mode = log_mode  # Toggle between log mode and direct mode
+    def __init__(self, state_file="crawl_state.json"):
         self.log_file = "raw_crawl.jsonl"
-        self.db_path = db_path
-        self.categories = {
-            "people": [
-                "professor", "faculty", "staff", "phd", "instructor", "lecturer",
-                "directory", "profile", "postdoc", "candidate", "dean", "chair"
-            ],
-            "academics": ["course", "syllabus", "curriculum", "major", "minor", "degree", "gpa", "credit", "catalog", "class", "registrar"],
-            "housing": ["housing", "dorm", "residence", "hall", "apartment", "lease", "dining", "roommate"],
-            "financial": ["scholarship", "tuition", "aid", "grant", "loan", "cost", "fee", "bursar"],
-            "career": ["career", "internship", "job", "resume", "handshake", "recruiting"],
-            "research": ["research", "lab", "publication", "thesis", "citation"], # "professor" removed to avoid over-matching
-            "library": ["library", "database", "collection", "borrow", "archive"],
-            "events": ["event", "calendar", "schedule", "workshop", "seminar"],
-            "policies": ["policy", "regulation", "code", "conduct", "privacy"],
-            "about": ["about", "history", "mission", "contact"],
-            "news": ["news", "blog", "story"],
-            "isss": [
-                "isss", "international student", "international students", "international office",
-                "international services", "immigration", "visa", "visas", "sevis",
-                "i-20", "i20", "ds-2019", "ds2019", "f-1", "f1", "j-1", "j1",
-                "opt", "cpt", "stem opt", "optional practical training",
-                "curricular practical training", "international scholar", "exchange visitor"
-            ],
-            "admissions": [
-                "admission", "admissions", "apply", "application", "applicant",
-                "deadline", "deadlines", "required documents", "requirements",
-                "test score", "test scores", "sat", "act", "toefl", "ielts", "gre", "gmat",
-                "transfer", "transfer student", "readmission", "deferral", "defer", "prospective student"
-            ],
-            "student_support": [
-                "orientation", "new student", "welcome days", "welcome week",
-                "student success", "success program", "tutoring", "tutor",
-                "advising", "advisor", "academic advising", "writing center",
-                "first-gen", "first generation", "mentoring", "mentor", "coaching"
-            ],
-            "student_life": [
-                "student life", "student organization", "student organizations", "club", "clubs",
-                "rso", "registered student organization", "campus recreation", "rec center",
-                "student government", "leadership program", "volunteer", "volunteering", "service project"
-            ],
-            "athletics": [
-                "athletic", "athletics", "sport", "sports", "varsity", "intramural", "intramurals",
-                "gym", "fitness", "workout", "recreation", "rec center", "stadium", "arena", "pool"
-            ],
-            "accessibility": [
-                "disability", "dres", "accessible", "accessibility", "accommodation", "accommodations",
-                "assistive", "wheelchair", "exam accommodation", "testing accommodation"
-            ],
-            "diversity": [
-                "diversity", "equity", "inclusion", "inclusive", "dei", "bias report", "bias incident",
-                "cultural center", "cultural centers", "lgbt", "lgbtq"
-            ],
-            "alumni": [
-                "alumni", "alumnus", "alumna", "alumnae", "alumni association", "alumni network",
-                "giving", "give", "donor", "donors", "fundraising", "advancement", "development office",
-                "homecoming", "alumni event", "alumni events"
-            ],
-            "campus_services": [
-                "id card", "i-card", "icard", "campus card", "printing", "printer", "copying",
-                "mail", "mailroom", "package", "packages", "campus store", "bookstore",
-                "lost and found", "lost & found"
-            ]
-        }
+        self.state_file = state_file
+        self.state = self._load_state()
+        self._upsert_count = 0
 
-        # Always connect to DB for compatibility; in log_mode we skip writing .md files
-        self.conn = sqlite3.connect(self.db_path)
-        # Enable WAL mode for better concurrent write performance
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.cursor = self.conn.cursor()
-        self._init_table()
+        # Keep existing JSONL data across restarts.
+        # Deduplicate by tracking which URLs are already in the file,
+        # so resumed crawls append only new/updated pages.
+        self._logged_urls = set()
+        if os.path.exists(self.log_file):
+            try:
+                with open(self.log_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            entry = json.loads(line)
+                            self._logged_urls.add(entry.get("url", ""))
+                print(f"Loaded {len(self._logged_urls)} existing entries from {self.log_file}")
+            except Exception as e:
+                print(f"Warning: could not read {self.log_file}: {e}")
 
-        # Ensure output directory exists (needed for normal mode)
-        if not self.log_mode and not os.path.exists(self.base_dir):
-            os.makedirs(self.base_dir)
+    def _load_state(self):
+        """Load crawl state from JSON file."""
+        if os.path.exists(self.state_file):
+            try:
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if not content:
+                        return {}
+                    return json.loads(content)
+            except json.JSONDecodeError:
+                print(f"Warning: {self.state_file} is corrupted. Starting with empty state.")
+                return {}
+        return {}
 
-    def _init_table(self):
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS pages (
-                url TEXT PRIMARY KEY,
-                content_hash TEXT,
-                category TEXT,
-                title TEXT,
-                last_crawled TIMESTAMP
-            )
-        ''')
-        self.conn.commit()
+    def _save_state(self):
+        """Atomically write crawl state to JSON file."""
+        tmp = self.state_file + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.state, f)
+        os.replace(tmp, self.state_file)
 
     def should_process(self, url, current_hash):
-        """
-        Check whether a page needs to be updated.
-        In log mode, this check is optional (C++ handles dedup later),
-        but we keep it to save bandwidth.
-        """
-        self.cursor.execute('SELECT content_hash FROM pages WHERE url = ?', (url,))
-        row = self.cursor.fetchone()
-        if row is None: return True, "NEW"
-        if row[0] != current_hash: return True, "UPDATED"
+        """Check whether a page needs to be crawled based on content hash."""
+        entry = self.state.get(url)
+        if entry is None: return True, "NEW"
+        if entry["hash"] != current_hash: return True, "UPDATED"
         return False, "UNCHANGED"
 
-    async def save_page(self, url, title, content, links=[], category="uncategorized"):
-        """Core save logic: write page data to JSONL (log mode) or Markdown (normal mode)."""
-        if self.log_mode:
-            entry = {
-                "url": url,
-                "title": title,
-                "content": content,
-                "links": links,
-                "timestamp": datetime.now().isoformat()
-            }
-            # Async append to avoid blocking the crawler
-            async with aiofiles.open(self.log_file, "a", encoding="utf-8") as f:
-                await f.write(json.dumps(entry) + "\n")
-
-            # In log mode, skip SQLite and .md writes; C++ will batch-process the JSONL
-            return "logged"
-
-        # --- Mode B: Traditional direct mode (Python generates .md files) ---
-
-        # Generate filename
-        filename = self._sanitize_filename(url)
-        # Ensure category subdirectory exists
-        category_dir = os.path.join(self.base_dir, category)
-        os.makedirs(category_dir, exist_ok=True)
-
-        file_path = os.path.join(category_dir, filename)
-
-        # Write Markdown file
-        md_content = f"> URL: {url}\n> Title: {title}\n> Category: {category}\n\n# {title}\n\n{content}"
-        async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
-            await f.write(md_content)
-
-        # Update database state
-        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
-        self.upsert_page(url, content_hash, category, title)
-
-        return "saved"
-
-    async def save_data(self, data_dict, category="uncategorized"):
-        """Wrapper that maps main.py's call signature (data_dict, category) to save_page()."""
-        return await self.save_page(
-            url=data_dict.get("url", ""),
-            title=data_dict.get("title", ""),
-            content=data_dict.get("content", ""),
-            links=data_dict.get("links", []),
-            category=category
-        )
-
-    async def delete_data(self, url, category):
-        """Delete the markdown file and DB record for a given URL."""
-        # Remove the .md file if it exists
-        filename = self._sanitize_filename(url)
-        file_path = os.path.join(self.base_dir, category, filename)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        # Remove DB record
-        self.delete_page(url)
-
     def classify(self, url, text):
-        scores = {k: 0 for k in self.categories.keys()}
+        """Keyword-based classification into category folders."""
+        scores = {k: 0 for k in CATEGORIES}
         text_lower = text.lower()
         url_lower = url.lower()
-        for category, keywords in self.categories.items():
+        for category, keywords in CATEGORIES.items():
             for word in keywords:
-                if word in url_lower: scores[category] += 5
+                if word in url_lower:
+                    scores[category] += 5
                 scores[category] += text_lower.count(word)
-
-        if not scores: return "uncategorized"
         best = max(scores, key=scores.get)
         return best if scores[best] > 2 else "uncategorized"
 
-    def upsert_page(self, url, content_hash, category, title):
-        now = datetime.now().isoformat()
-        try:
-            self.cursor.execute('''
-                INSERT INTO pages (url, content_hash, category, title, last_crawled)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(url) DO UPDATE SET
-                    content_hash=excluded.content_hash,
-                    category=excluded.category,
-                    title=excluded.title,
-                    last_crawled=excluded.last_crawled
-            ''', (url, content_hash, category, title, now))
-            self.conn.commit()
-        except Exception as e:
-            logging.error(f"DB Error: {e}")
+    async def save_page(self, url, title, content, links=[], category="uncategorized"):
+        """Write page data to JSONL for C++ to process downstream."""
+        entry = {
+            "url": url,
+            "title": title,
+            "content": content,
+            "category": category,
+            "links": links,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        if url in self._logged_urls:
+            # URL already in JSONL — rewrite the entire file with updated entry
+            await self._rewrite_jsonl_entry(url, entry)
+        else:
+            # New URL — just append
+            async with aiofiles.open(self.log_file, "a", encoding="utf-8") as f:
+                await f.write(json.dumps(entry) + "\n")
+            self._logged_urls.add(url)
+        return "logged"
+
+    async def _rewrite_jsonl_entry(self, url, new_entry):
+        """Replace an existing JSONL entry for a URL with updated data."""
+        lines = []
+        async with aiofiles.open(self.log_file, "r", encoding="utf-8") as f:
+            async for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    existing = json.loads(line)
+                    if existing.get("url") == url:
+                        lines.append(json.dumps(new_entry))
+                    else:
+                        lines.append(line)
+                except json.JSONDecodeError:
+                    lines.append(line)
+        async with aiofiles.open(self.log_file, "w", encoding="utf-8") as f:
+            await f.write("\n".join(lines) + "\n")
+
+    def upsert_page(self, url, content_hash, category="uncategorized"):
+        old = self.state.get(url)
+        # If category changed, delete the old .md file from the previous folder
+        if old and old.get("category") and old["category"] != category:
+            old_path = os.path.join(BASE_DIR, old["category"], sanitize_filename(url))
+            if os.path.exists(old_path):
+                os.remove(old_path)
+                logging.info(f"🔄 [Moved] {old['category']} -> {category}: {url}")
+
+        self.state[url] = {
+            "hash": content_hash,
+            "category": category,
+            "last_crawled": datetime.now().isoformat()
+        }
+        self._upsert_count += 1
+        if self._upsert_count % CHECKPOINT_INTERVAL == 0:
+            self._save_state()
 
     def get_all_urls(self):
-        self.cursor.execute('SELECT url, category, title FROM pages')
-        return self.cursor.fetchall()
+        return [url for url in self.state]
 
     def delete_page(self, url):
-        self.cursor.execute('DELETE FROM pages WHERE url = ?', (url,))
-        self.conn.commit()
+        old = self.state.pop(url, None)
+        if old and old.get("category"):
+            old_path = os.path.join(BASE_DIR, old["category"], sanitize_filename(url))
+            if os.path.exists(old_path):
+                os.remove(old_path)
+        self._logged_urls.discard(url)
+        self._remove_jsonl_entry(url)
+
+    def _remove_jsonl_entry(self, url):
+        """Synchronously remove a URL's entry from the JSONL file."""
+        if not os.path.exists(self.log_file):
+            return
+        try:
+            with open(self.log_file, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            with open(self.log_file, "w", encoding="utf-8") as f:
+                for line in lines:
+                    line_stripped = line.strip()
+                    if not line_stripped:
+                        continue
+                    try:
+                        entry = json.loads(line_stripped)
+                        if entry.get("url") != url:
+                            f.write(line_stripped + "\n")
+                    except json.JSONDecodeError:
+                        f.write(line_stripped + "\n")
+        except Exception as e:
+            logging.warning(f"Failed to remove {url} from JSONL: {e}")
 
     def close(self):
-        self.conn.close()
-
-    def _sanitize_filename(self, url):
-        """Helper: sanitize a URL into a safe filename."""
-        name = url.replace("https://", "").replace("http://", "").replace("/", "_")
-        # Truncate to avoid filesystem errors
-        if len(name) > 100:
-            name = name[:100]
-        return name + ".md"
+        self._save_state()

@@ -117,16 +117,21 @@ void load_pagerank_scores(const std::string& pr_file) {
 }
 
 // Consumer thread: generate Markdown files from parsed JSON lines
-void file_writer_worker(SafeQueue<std::string>& input_queue, std::string output_dir) {
+void file_writer_worker(SafeQueue<std::string>& input_queue, std::string base_dir) {
     std::string line;
     while (input_queue.pop(line)) {
         // 1. Parse fields
         std::string url = extract_json_value(line, "url");
         std::string title = extract_json_value(line, "title");
         std::string content = extract_json_value(line, "content");
-        // 2. Generate filename
+        std::string category = extract_json_value(line, "category");
+        if (category.empty()) category = "uncategorized";
+
+        // 2. Ensure category subdirectory exists and generate filepath
+        std::string category_dir = base_dir + "/" + category;
+        fs::create_directories(category_dir);
         std::string filename = sanitize_filename(url);
-        std::string filepath = output_dir + "/" + filename;
+        std::string filepath = category_dir + "/" + filename;
 
         // 3. Write Markdown (unescape \n, \t, \" in content)
         std::string clean_content;
@@ -149,21 +154,21 @@ void file_writer_worker(SafeQueue<std::string>& input_queue, std::string output_
                 pr_score = pagerank_scores[url];
             }
         }
-        
+
         // Determine priority based on PageRank threshold
         std::string priority = (pr_score > 5.0) ? "high" : "normal";
-        
+
         std::ofstream outfile(filepath);
         if (outfile.is_open()) {
             // Write YAML frontmatter
             outfile << "---\n";
             outfile << "url: " << url << "\n";
             outfile << "title: " << title << "\n";
-            outfile << "category: uncategorized\n";
+            outfile << "category: " << category << "\n";
             outfile << "pagerank_score: " << std::fixed << std::setprecision(6) << pr_score << "\n";
             outfile << "priority: " << priority << "\n";
             outfile << "---\n\n";
-            
+
             // Write content
             outfile << "# " << title << "\n\n";
             outfile << clean_content;
@@ -174,14 +179,14 @@ void file_writer_worker(SafeQueue<std::string>& input_queue, std::string output_
 
 int main() {
     std::string log_file = "raw_crawl.jsonl";
-    std::string output_dir = "uiuc_knowledge_base/uncategorized";
+    std::string base_dir = "uiuc_knowledge_base";
     std::string pr_file = "pagerank_results.txt";
 
     // Load PageRank scores
     load_pagerank_scores(pr_file);
-    
-    // Ensure output directory exists
-    fs::create_directories(output_dir);
+
+    // Ensure base output directory exists
+    fs::create_directories(base_dir);
 
     SafeQueue<std::string> queue;
 
@@ -189,11 +194,11 @@ int main() {
     int num_threads = std::max(1u, std::thread::hardware_concurrency());
     std::vector<std::thread> workers;
     for (int i = 0; i < num_threads; ++i) {
-        workers.emplace_back(file_writer_worker, std::ref(queue), output_dir);
+        workers.emplace_back(file_writer_worker, std::ref(queue), base_dir);
     }
 
     std::cout << "C++ Middleware starting..." << std::endl;
-    std::cout << "Reading from " << log_file << " -> Writing to " << output_dir << std::endl;
+    std::cout << "Reading from " << log_file << " -> Writing to " << base_dir << std::endl;
 
     // Main thread: read lines and push into queue
     std::ifstream file(log_file);
