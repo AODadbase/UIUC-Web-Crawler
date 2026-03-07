@@ -30,8 +30,9 @@ pagerank_results.txt
 simhash_results.txt
 inverted_index.txt
 
-# --- Sensitive ---
+# --- Sensitive / generated ---
 proxies.txt
+blacklist.txt
 
 # --- OS ---
 .DS_Store

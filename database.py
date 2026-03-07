@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import asyncio
 import aiofiles
 from datetime import datetime
 
@@ -110,8 +111,7 @@ CATEGORIES = {
     ],
 }
 
-CHECKPOINT_INTERVAL = 10  # Save state to disk every N pages
-
+CHECKPOINT_INTERVAL = 10
 
 BASE_DIR = "uiuc_knowledge_base"
 
@@ -133,9 +133,11 @@ class StorageManager:
         self.state = self._load_state()
         self._upsert_count = 0
 
-        # Keep existing JSONL data across restarts.
-        # Deduplicate by tracking which URLs are already in the file,
-        # so resumed crawls append only new/updated pages.
+        # Single lock serializing all JSONL file reads and writes.
+        # Without this, concurrent coroutines performing rewrite operations
+        # would clobber each other's updates.
+        self._jsonl_lock = asyncio.Lock()
+
         self._logged_urls = set()
         if os.path.exists(self.log_file):
             try:
@@ -173,8 +175,10 @@ class StorageManager:
     def should_process(self, url, current_hash):
         """Check whether a page needs to be crawled based on content hash."""
         entry = self.state.get(url)
-        if entry is None: return True, "NEW"
-        if entry["hash"] != current_hash: return True, "UPDATED"
+        if entry is None:
+            return True, "NEW"
+        if entry["hash"] != current_hash:
+            return True, "UPDATED"
         return False, "UNCHANGED"
 
     def classify(self, url, text):
@@ -190,29 +194,36 @@ class StorageManager:
         best = max(scores, key=scores.get)
         return best if scores[best] > 2 else "uncategorized"
 
-    async def save_page(self, url, title, content, links=[], category="uncategorized"):
+    async def save_page(self, url, title, content, links=None, category="uncategorized"):
         """Write page data to JSONL for C++ to process downstream."""
+        if links is None:
+            links = []
         entry = {
             "url": url,
             "title": title,
             "content": content,
             "category": category,
             "links": links,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
         }
 
-        if url in self._logged_urls:
-            # URL already in JSONL — rewrite the entire file with updated entry
-            await self._rewrite_jsonl_entry(url, entry)
-        else:
-            # New URL — just append
-            async with aiofiles.open(self.log_file, "a", encoding="utf-8") as f:
-                await f.write(json.dumps(entry) + "\n")
-            self._logged_urls.add(url)
+        # The entire check-then-write sequence must be atomic to prevent
+        # two concurrent workers from both reading the old file state and
+        # each writing a conflicting version.
+        async with self._jsonl_lock:
+            if url in self._logged_urls:
+                await self._rewrite_jsonl_entry(url, entry)
+            else:
+                async with aiofiles.open(self.log_file, "a", encoding="utf-8") as f:
+                    await f.write(json.dumps(entry) + "\n")
+                self._logged_urls.add(url)
         return "logged"
 
     async def _rewrite_jsonl_entry(self, url, new_entry):
-        """Replace an existing JSONL entry for a URL with updated data."""
+        """Replace an existing JSONL entry in-place.
+
+        Must only be called while self._jsonl_lock is held.
+        """
         lines = []
         async with aiofiles.open(self.log_file, "r", encoding="utf-8") as f:
             async for line in f:
@@ -232,54 +243,56 @@ class StorageManager:
 
     def upsert_page(self, url, content_hash, category="uncategorized"):
         old = self.state.get(url)
-        # If category changed, delete the old .md file from the previous folder
         if old and old.get("category") and old["category"] != category:
             old_path = os.path.join(BASE_DIR, old["category"], sanitize_filename(url))
             if os.path.exists(old_path):
                 os.remove(old_path)
-                logging.info(f"🔄 [Moved] {old['category']} -> {category}: {url}")
+                logging.info(f"[Moved] {old['category']} -> {category}: {url}")
 
         self.state[url] = {
             "hash": content_hash,
             "category": category,
-            "last_crawled": datetime.now().isoformat()
+            "last_crawled": datetime.now().isoformat(),
         }
         self._upsert_count += 1
         if self._upsert_count % CHECKPOINT_INTERVAL == 0:
             self._save_state()
 
     def get_all_urls(self):
-        return [url for url in self.state]
+        return list(self.state.keys())
 
-    def delete_page(self, url):
+    async def delete_page(self, url):
+        """Remove a page from state, disk, and JSONL log."""
         old = self.state.pop(url, None)
         if old and old.get("category"):
             old_path = os.path.join(BASE_DIR, old["category"], sanitize_filename(url))
             if os.path.exists(old_path):
                 os.remove(old_path)
         self._logged_urls.discard(url)
-        self._remove_jsonl_entry(url)
+        await self._remove_jsonl_entry(url)
 
-    def _remove_jsonl_entry(self, url):
-        """Synchronously remove a URL's entry from the JSONL file."""
-        if not os.path.exists(self.log_file):
-            return
-        try:
-            with open(self.log_file, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            with open(self.log_file, "w", encoding="utf-8") as f:
-                for line in lines:
-                    line_stripped = line.strip()
-                    if not line_stripped:
-                        continue
-                    try:
-                        entry = json.loads(line_stripped)
-                        if entry.get("url") != url:
-                            f.write(line_stripped + "\n")
-                    except json.JSONDecodeError:
-                        f.write(line_stripped + "\n")
-        except Exception as e:
-            logging.warning(f"Failed to remove {url} from JSONL: {e}")
+    async def _remove_jsonl_entry(self, url):
+        """Asynchronously remove a URL's entry from the JSONL file."""
+        async with self._jsonl_lock:
+            if not os.path.exists(self.log_file):
+                return
+            try:
+                lines = []
+                async with aiofiles.open(self.log_file, "r", encoding="utf-8") as f:
+                    async for line in f:
+                        line_stripped = line.strip()
+                        if not line_stripped:
+                            continue
+                        try:
+                            entry = json.loads(line_stripped)
+                            if entry.get("url") != url:
+                                lines.append(line_stripped)
+                        except json.JSONDecodeError:
+                            lines.append(line_stripped)
+                async with aiofiles.open(self.log_file, "w", encoding="utf-8") as f:
+                    await f.write("\n".join(lines) + "\n")
+            except Exception as e:
+                logging.warning(f"Failed to remove {url} from JSONL: {e}")
 
     def close(self):
         self._save_state()
