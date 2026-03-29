@@ -26,7 +26,7 @@ POLITENESS_DELAY = 2.0
 VISITED_TTL_DAYS = 7
 VISITED_TTL_SECONDS = VISITED_TTL_DAYS * 86400
 MAX_RETRIES_PER_DOMAIN = 4
-RETRY_EXTRA_WAIT = 5
+RETRY_BACKOFF = [30, 60, 120]   # seconds to wait before retry 1, 2, 3
 
 # Phase 3 — stale-content prune: lightweight HEAD requests, no proxy needed
 PRUNE_CONCURRENCY   = 10
@@ -580,7 +580,7 @@ class UnifiedCrawler:
                     await self.add_to_blacklist(url)
                     return "", True
 
-            extra_wait = attempt * RETRY_EXTRA_WAIT
+            extra_wait = RETRY_BACKOFF[min(attempt - 1, len(RETRY_BACKOFF) - 1)]
             logging.info(f"Waiting {extra_wait}s before retry {attempt + 1} for {url}")
             await asyncio.sleep(extra_wait)
 
