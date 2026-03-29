@@ -11,10 +11,12 @@ A production-grade, full-cycle web crawler designed to build a comprehensive kno
 
 ### 2. Incremental Crawling & Resumability
 * **Content Hashing**: Tracks page content via MD5 hashes in `crawl_state.json`. Only new or changed pages are re-crawled.
+* **TTL-Based Re-crawl**: `visited` is a timestamp dictionary, not a plain set. URLs older than `VISITED_TTL_DAYS` (default: 7) are automatically re-queued on the next run, ensuring data stays fresh without manual intervention.
 * **Ctrl+C Safe**: Signal handlers ensure state is always saved on interrupt. Resume exactly where you left off.
 * **Periodic Checkpointing**: State is flushed to disk every 10 pages, minimizing data loss on crash.
 * **Auto-Pruning**: Detects and removes stale content (404/410) and cleans up old `.md` files.
 * **Global Blacklist**: Persistent `blacklist.txt` skips known dead, forbidden, or login-only URLs.
+* **Fresh-Run Mode**: `--fresh` flag wipes all crawl state before starting, guaranteeing a full re-crawl from scratch.
 
 ### 3. Keyword Classification at Crawl Time
 * Pages are classified into 24 category folders during crawling using keyword scoring.
@@ -69,7 +71,12 @@ High-performance analysis tools written in multithreaded C++17:
 ### Full Pipeline (Recommended)
 ```bash
 chmod +x run_all.sh
+
+# Incremental run — skips URLs crawled within the last 7 days
 ./run_all.sh
+
+# Fresh run — clears all state and re-crawls every URL from scratch
+./run_all.sh --fresh
 ```
 
 The pipeline executes:
@@ -129,9 +136,12 @@ AI Reorganizer --> moves uncategorized/ leftovers into proper folders
 
 | File | Purpose | Persists across runs |
 |------|---------|---------------------|
-| `crawl_state.json` | URL-to-hash map for incremental crawling | Yes |
-| `raw_crawl.jsonl` | Current run's new/updated pages (truncated each run) | No |
-| `blacklist.txt` | URLs to permanently skip | Yes |
+| `crawl_state.json` | URL → `{hash, category, last_crawled}` map; drives TTL and incremental logic | Yes |
+| `pending_queue.json` | URLs queued but unprocessed at interrupt time; auto-deleted on clean finish | Interrupt only |
+| `raw_crawl.jsonl` | Raw page data consumed by C++ pipeline | Yes (appended/updated) |
+| `blacklist.txt` | URLs to permanently skip; scrubbed on each run via blacklist recovery | Yes |
+
+To reset all state and force a full re-crawl, either run `./run_all.sh --fresh` or delete `crawl_state.json`, `pending_queue.json`, and `raw_crawl.jsonl` manually.
 
 ## Project Structure
 ```text

@@ -23,6 +23,8 @@ CONCURRENCY = 10          # main crawler workers (1 worker ≈ 1 proxy IP)
 DATA_DIR = "uiuc_knowledge_base"
 
 POLITENESS_DELAY = 2.0
+VISITED_TTL_DAYS = 7
+VISITED_TTL_SECONDS = VISITED_TTL_DAYS * 86400
 MAX_RETRIES_PER_DOMAIN = 4
 RETRY_EXTRA_WAIT = 5
 
@@ -181,7 +183,8 @@ class UIUCPageParser:
 class UnifiedCrawler:
     def __init__(self):
         self.queue = asyncio.Queue()
-        self.visited = set()
+        self.visited = {}   # {url: crawl_timestamp_float}
+        self._run_start = time.time()
         self.storage = StorageManager()
         self.middleware = RequestMiddleware()
         self.pw_manager = PlaywrightManager(self.middleware)
@@ -201,8 +204,13 @@ class UnifiedCrawler:
         # re-fetch every URL from scratch.  Pages already in state are skipped;
         # delete crawl_state.json for a full re-crawl.
         restored = 0
-        for url in self.storage.state:
-            self.visited.add(url)
+        for url, data in self.storage.state.items():
+            raw = data.get("last_crawled", "2000-01-01T00:00:00")
+            try:
+                ts = datetime.fromisoformat(raw).timestamp()
+            except ValueError:
+                ts = 0.0
+            self.visited[url] = ts
             restored += 1
         if restored:
             print(f"Restored {restored} visited URLs from previous crawl state")
@@ -214,10 +222,17 @@ class UnifiedCrawler:
         for url in self.storage.load_pending_queue():
             if url not in self.visited:
                 self.queue.put_nowait(url)
-                self.visited.add(url)
+                self.visited[url] = 0.0   # epoch → stale, re-crawl when re-discovered
                 restored_pending += 1
         if restored_pending:
             print(f"Restored {restored_pending} pending URLs from interrupted crawl")
+
+    def _is_fresh(self, url):
+        """Return True if url was crawled recently enough to skip re-queuing."""
+        ts = self.visited.get(url)
+        if ts is None:
+            return False
+        return (time.time() - ts) < VISITED_TTL_SECONDS
 
     def _load_blacklist(self):
         """Load blacklist entries from file, ignoring empty lines."""
@@ -499,9 +514,9 @@ class UnifiedCrawler:
         for sub, alive in zip(dns_tasks.keys(), results):
             if alive:
                 full_url = f"https://{sub}"
-                if full_url not in self.visited:
+                if not self._is_fresh(full_url):
                     self.queue.put_nowait(full_url)
-                    self.visited.add(full_url)
+                    self.visited[full_url] = time.time()
                     seeded += 1
             else:
                 print(f"  Skipping dead subdomain: {sub}")
@@ -517,9 +532,9 @@ class UnifiedCrawler:
                 f"https://cs.{ROOT_DOMAIN}",
             ]
             for seed in seeds:
-                if seed not in self.visited:
+                if not self._is_fresh(seed):
                     self.queue.put_nowait(seed)
-                    self.visited.add(seed)
+                    self.visited[seed] = time.time()
 
     async def _fetch_with_retry(self, session, url, _domain):
         """Try fetching a URL up to MAX_RETRIES_PER_DOMAIN times with IP rotation."""
@@ -662,19 +677,19 @@ class UnifiedCrawler:
             for link in data.get('links', []):
                 # Links are already absolute and fragment-stripped by UIUCPageParser;
                 # do NOT re-apply urljoin/urldefrag here.
-                if link in self.visited or link in self.blacklist:
+                if self._is_fresh(link) or link in self.blacklist:
                     continue
                 parsed = urlparse(link)
                 if parsed.netloc.endswith(ROOT_DOMAIN) and parsed.scheme in ['http', 'https']:
                     if not link.endswith(('.pdf', '.jpg', '.png', '.css', '.js')):
-                        self.visited.add(link)
+                        self.visited[link] = time.time()
                         self.queue.put_nowait(link)
 
     async def prune_stale_content(self, session):
         """Check previously seen URLs concurrently; remove content that no longer exists."""
         print("\n[Phase 3] Pruning stale content...")
         all_urls = self.storage.get_all_urls()
-        suspects = [url for url in all_urls if url not in self.visited]
+        suspects = [url for url in all_urls if self.visited.get(url, 0) < self._run_start]
         print(f"Found {len(suspects)} previously seen pages not visited in this run. Verifying...")
 
         sem = asyncio.Semaphore(PRUNE_CONCURRENCY)

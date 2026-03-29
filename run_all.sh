@@ -5,6 +5,23 @@ set -o pipefail
 # Resolve the directory this script lives in
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# --fresh flag: wipe all crawl state so every URL is re-crawled from scratch
+FRESH=0
+for arg in "$@"; do
+    if [ "$arg" = "--fresh" ]; then
+        FRESH=1
+    fi
+done
+
+if [ "$FRESH" = "1" ]; then
+    echo "[Fresh run] Clearing crawl state..."
+    rm -f "$SCRIPT_DIR/crawl_state.json"
+    rm -f "$SCRIPT_DIR/pending_queue.json"
+    rm -f "$SCRIPT_DIR/raw_crawl.jsonl"
+    echo "[Fresh run] State cleared. All URLs will be re-crawled."
+    echo ""
+fi
+
 echo "Phase 1: Python crawler..."
 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/main.py"
 

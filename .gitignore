@@ -14,6 +14,8 @@ raw_crawl_validated.jsonl
 # --- Crawl state ---
 crawl_state.json
 crawl_state.json.tmp
+pending_queue.json
+pending_queue.json.tmp
 crawler_state.db
 crawler_state.db-shm
 crawler_state.db-wal
