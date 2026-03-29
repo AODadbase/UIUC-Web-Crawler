@@ -294,5 +294,33 @@ class StorageManager:
             except Exception as e:
                 logging.warning(f"Failed to remove {url} from JSONL: {e}")
 
+    def save_pending_queue(self, urls):
+        """Atomically persist the pending queue to disk for resume on next run."""
+        tmp = "pending_queue.json.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(list(urls), f)
+        os.replace(tmp, "pending_queue.json")
+
+    def load_pending_queue(self):
+        """Load and delete the pending queue file from a previous interrupted run."""
+        path = "pending_queue.json"
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                urls = json.load(f)
+            os.remove(path)
+            return urls
+        except Exception as e:
+            print(f"Warning: could not load pending queue: {e}")
+            return []
+
+    def clear_pending_queue(self):
+        """Remove the pending queue file after a clean crawl completion."""
+        try:
+            os.remove("pending_queue.json")
+        except FileNotFoundError:
+            pass
+
     def close(self):
         self._save_state()

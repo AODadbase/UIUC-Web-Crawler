@@ -19,13 +19,19 @@ from playwright.async_api import async_playwright
 # ================= Configuration =================
 ROOT_DOMAIN = "illinois.edu"
 MAX_PAGES_TOTAL = 300
-CONCURRENCY = 200
+CONCURRENCY = 10          # main crawler workers (1 worker ≈ 1 proxy IP)
 DATA_DIR = "uiuc_knowledge_base"
 
 POLITENESS_DELAY = 2.0
-MAX_RETRIES_429 = 4
 MAX_RETRIES_PER_DOMAIN = 4
 RETRY_EXTRA_WAIT = 5
+
+# Phase 3 — stale-content prune: lightweight HEAD requests, no proxy needed
+PRUNE_CONCURRENCY   = 10
+# Phase 4 — blacklist recovery: full GET through proxy pool; keep narrow to
+# avoid proxy congestion and per-host rate-limit bans
+RECOVERY_CONCURRENCY = 3
+RECOVERY_HOST_DELAY  = 3.0  # seconds between requests to the same domain
 
 SECURITYTRAILS_API_KEY = os.environ.get("SECURITYTRAILS_API_KEY", "")
 
@@ -62,7 +68,7 @@ class DomainRateLimiter:
 
     async def wait(self, domain):
         # Hold the lock only long enough to read/update the timestamp.
-        # Sleeping inside the lock would serialize ALL 200 workers on one lock.
+        # Sleeping inside the lock would serialize all workers on one lock.
         async with self._lock:
             now = time.monotonic()
             last = self._last_request.get(domain, 0.0)
@@ -183,6 +189,8 @@ class UnifiedCrawler:
         self.retry_counts = {}
         self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0, "blacklisted": 0}
         self._shutting_down = False
+        self._shutdown_event = None  # set in start() once the event loop is running
+        self._queue_persisted = False  # set True once pending queue has been saved/cleared
 
         self.blacklist = set()
         self._load_blacklist()
@@ -199,6 +207,18 @@ class UnifiedCrawler:
         if restored:
             print(f"Restored {restored} visited URLs from previous crawl state")
 
+        # Restore URLs that were queued but unprocessed when the last run was
+        # interrupted.  load_pending_queue() deletes the file after reading so
+        # a subsequent clean run won't re-load it.
+        restored_pending = 0
+        for url in self.storage.load_pending_queue():
+            if url not in self.visited:
+                self.queue.put_nowait(url)
+                self.visited.add(url)
+                restored_pending += 1
+        if restored_pending:
+            print(f"Restored {restored_pending} pending URLs from interrupted crawl")
+
     def _load_blacklist(self):
         """Load blacklist entries from file, ignoring empty lines."""
         if os.path.exists("blacklist.txt"):
@@ -214,7 +234,7 @@ class UnifiedCrawler:
         MAX_DNS_FAILURES = 3
         if self.dns_fail_count.get(domain, 0) >= MAX_DNS_FAILURES:
             return False
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             await loop.run_in_executor(None, socket.getaddrinfo, domain, None)
             self.dns_fail_count.pop(domain, None)
@@ -237,7 +257,8 @@ class UnifiedCrawler:
     async def start(self):
         print(f"Starting hybrid crawler (aiohttp + Playwright). Target domain: {ROOT_DOMAIN}")
 
-        loop = asyncio.get_event_loop()
+        self._shutdown_event = asyncio.Event()
+        loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, self._request_shutdown)
 
@@ -253,21 +274,55 @@ class UnifiedCrawler:
             #   enable_cleanup_closed — reclaims closed sockets promptly
             connector = aiohttp.TCPConnector(
                 limit=CONCURRENCY,
-                limit_per_host=10,
+                limit_per_host=3,   # DomainRateLimiter enforces real pacing; cap TCP slots tightly
                 ttl_dns_cache=300,
                 enable_cleanup_closed=True,
             )
             async with aiohttp.ClientSession(connector=connector) as session:
                 await self.inject_subdomains(session)
                 workers = [asyncio.create_task(self.worker(session, i)) for i in range(CONCURRENCY)]
-                await self.queue.join()
-                for w in workers:
-                    w.cancel()
-                await self.prune_stale_content(session)
-                await self.recover_blacklist(session)
-        except asyncio.CancelledError:
-            logging.warning("Crawl interrupted, saving state...")
+
+                # Race: either the queue drains naturally (normal) or a shutdown
+                # signal fires first (interrupted).
+                queue_done   = asyncio.create_task(self.queue.join())
+                shutdown_wait = asyncio.create_task(self._shutdown_event.wait())
+                await asyncio.wait([queue_done, shutdown_wait], return_when=asyncio.FIRST_COMPLETED)
+                queue_done.cancel()
+                shutdown_wait.cancel()
+
+                if self._shutting_down:
+                    # --- Graceful shutdown path ---
+                    # Snapshot queue contents before workers can drain them, then
+                    # persist so the next run can resume exactly where we stopped.
+                    saved = self._drain_queue()
+                    self.storage.save_pending_queue(saved)
+                    self._queue_persisted = True
+                    logging.info(f"[Shutdown] Persisted {len(saved)} queued URLs for next run")
+                    # Unblock any workers waiting on queue.get() with a sentinel.
+                    for _ in range(CONCURRENCY):
+                        self.queue.put_nowait(None)
+                    await asyncio.gather(*workers, return_exceptions=True)
+                    # Run blacklist recovery even on interrupt to keep it clean.
+                    await self.recover_blacklist(session)
+                else:
+                    # --- Normal completion path ---
+                    for w in workers:
+                        w.cancel()
+                    await asyncio.gather(*workers, return_exceptions=True)
+                    self.storage.clear_pending_queue()
+                    self._queue_persisted = True
+                    await self.prune_stale_content(session)
+                    await self.recover_blacklist(session)
+
         finally:
+            # Fallback: if an unexpected exception (CancelledError, network crash,
+            # etc.) bypassed both branches above, drain and persist whatever is
+            # still in the queue so the next run can resume.
+            if not self._queue_persisted:
+                saved = self._drain_queue()
+                self.storage.save_pending_queue(saved)
+                logging.warning(f"[Emergency] Persisted {len(saved)} queued URLs after abnormal exit")
+
             await self.pw_manager.stop()
             self.storage.close()
 
@@ -282,11 +337,30 @@ class UnifiedCrawler:
 
     def _request_shutdown(self):
         if self._shutting_down:
-            return
+            # Second signal: executor threads may be blocking exit — force quit.
+            logging.warning("Forced exit — terminating immediately")
+            os._exit(1)
         self._shutting_down = True
-        logging.warning("Shutdown requested, finishing up...")
-        for task in asyncio.all_tasks():
-            task.cancel()
+        logging.warning("Shutdown requested — finishing in-flight requests (Ctrl+C again to force quit)")
+        if self._shutdown_event:
+            self._shutdown_event.set()
+
+    def _drain_queue(self):
+        """Synchronously drain all items from the queue and return them.
+
+        Safe to call only while the event loop is at an await point (no
+        concurrent coroutines running).  task_done() is called for each item
+        so the queue's internal unfinished-tasks counter stays consistent.
+        """
+        items = []
+        while True:
+            try:
+                url = self.queue.get_nowait()
+                self.queue.task_done()
+                items.append(url)
+            except asyncio.QueueEmpty:
+                break
+        return items
 
     async def inject_subdomains(self, session):
         """Seed the crawler with subdomains discovered from multiple sources with fallback."""
@@ -398,13 +472,12 @@ class UnifiedCrawler:
                 "data", "api", "web", "blog", "media", "studentaffairs",
             ]
             before = len(subdomains)
-            for prefix in COMMON_PREFIXES:
-                candidate = f"{prefix}.{ROOT_DOMAIN}"
-                try:
-                    socket.getaddrinfo(candidate, None, socket.AF_INET, socket.SOCK_STREAM)
+            candidates = [f"{p}.{ROOT_DOMAIN}" for p in COMMON_PREFIXES]
+            # Use check_dns (run_in_executor) to avoid blocking the event loop.
+            results = await asyncio.gather(*[self.check_dns(c) for c in candidates])
+            for candidate, alive in zip(candidates, results):
+                if alive:
                     subdomains.add(candidate)
-                except socket.gaierror:
-                    pass
             print(f"  DNS bruteforce: added {len(subdomains) - before} new subdomains")
 
         # --- Filter and enqueue (with DNS pre-check) ---
@@ -413,6 +486,12 @@ class UnifiedCrawler:
             sub for sub in subdomains
             if sub.endswith(ROOT_DOMAIN) and not any(bad in sub for bad in IGNORED_SUBS)
         ]
+
+        # If shutdown was requested while we were querying external APIs,
+        # skip the DNS pre-check entirely.  run_in_executor threads cannot be
+        # cancelled; spawning hundreds of them would block process exit.
+        if self._shutting_down:
+            return
 
         print(f"  DNS-checking {len(filtered)} candidate subdomains...")
         dns_tasks = {sub: self.check_dns(sub) for sub in filtered}
@@ -496,16 +575,27 @@ class UnifiedCrawler:
         while True:
             try:
                 url = await self.queue.get()
+            except asyncio.CancelledError:
+                break
 
+            # None is the sentinel put by graceful shutdown to unblock queue.get()
+            if url is None:
+                self.queue.task_done()
+                break
+
+            # Shutdown was set after we dequeued this URL — stop processing
+            if self._shutting_down:
+                self.queue.task_done()
+                break
+
+            try:
                 if url in self.blacklist:
-                    self.queue.task_done()
                     continue
 
                 domain = urlparse(url).netloc
 
                 if not await self.check_dns(domain):
                     await self.add_to_blacklist(url)
-                    self.queue.task_done()
                     continue
 
                 await self.rate_limiter.wait(domain)
@@ -538,12 +628,11 @@ class UnifiedCrawler:
                 if html_text and len(html_text) > 100:
                     await self.process_html(html_text, url)
 
-                self.queue.task_done()
-
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logging.error(f"Worker Error: {e}")
+            finally:
                 self.queue.task_done()
 
     async def process_html(self, html, url):
@@ -569,7 +658,7 @@ class UnifiedCrawler:
         else:
             self.stats['skipped'] += 1
 
-        if self.stats['scanned'] < MAX_PAGES_TOTAL:
+        if self.stats['scanned'] < MAX_PAGES_TOTAL and not self._shutting_down:
             for link in data.get('links', []):
                 # Links are already absolute and fragment-stripped by UIUCPageParser;
                 # do NOT re-apply urljoin/urldefrag here.
@@ -582,57 +671,82 @@ class UnifiedCrawler:
                         self.queue.put_nowait(link)
 
     async def prune_stale_content(self, session):
-        """Check previously seen URLs and remove content that no longer exists."""
+        """Check previously seen URLs concurrently; remove content that no longer exists."""
         print("\n[Phase 3] Pruning stale content...")
         all_urls = self.storage.get_all_urls()
         suspects = [url for url in all_urls if url not in self.visited]
         print(f"Found {len(suspects)} previously seen pages not visited in this run. Verifying...")
-        for url in suspects:
-            try:
-                async with session.head(url, timeout=HEAD_TIMEOUT, allow_redirects=True, ssl=False) as resp:
-                    if resp.status in (404, 410):
-                        logging.warning(f"[Stale] {url} -> deleted")
-                        await self.storage.delete_page(url)
-                        self.stats['deleted'] += 1
-            except Exception:
-                pass
+
+        sem = asyncio.Semaphore(PRUNE_CONCURRENCY)
+
+        async def check_one(url):
+            async with sem:
+                try:
+                    async with session.head(url, timeout=HEAD_TIMEOUT, allow_redirects=True, ssl=False) as resp:
+                        if resp.status in (404, 410):
+                            logging.warning(f"[Stale] {url} -> deleted")
+                            await self.storage.delete_page(url)
+                            self.stats['deleted'] += 1
+                except Exception:
+                    pass
+
+        await asyncio.gather(*[check_one(url) for url in suspects])
 
     async def recover_blacklist(self, session):
-        """Re-check blacklisted URLs; remove false positives that now return 200."""
-        print(f"\n[Phase 4] Blacklist recovery — re-checking {len(self.blacklist)} blacklisted URLs...")
-        recovered = 0
-        still_dead = 0
-        surviving = set()
+        """Re-check blacklisted URLs concurrently with per-host throttling.
 
-        for url in self.blacklist:
-            if self._shutting_down:
-                break
-            try:
-                headers = self.middleware.get_random_header()
-                # Use a proxy on re-check; the URL may have been blocked by IP.
-                proxy = self.middleware.get_random_proxy()
-                async with session.get(
-                    url, headers=headers, proxy=proxy,
-                    timeout=FETCH_TIMEOUT, ssl=False, allow_redirects=True
-                ) as resp:
-                    if resp.status == 200:
-                        recovered += 1
-                        logging.info(f"[Recovered] {url} — now returns 200")
-                    else:
-                        surviving.add(url)
-                        still_dead += 1
-            except Exception:
-                surviving.add(url)
-                still_dead += 1
+        Uses a narrow global semaphore (RECOVERY_CONCURRENCY) to avoid flooding
+        the proxy pool, plus a per-domain rate limiter (RECOVERY_HOST_DELAY) to
+        prevent triggering extended bans on target sites.
+        """
+        print(f"\n[Phase 4] Blacklist recovery — re-checking {len(self.blacklist)} blacklisted URLs...")
+
+        recovered_urls = []
+        surviving = set()
+        sem = asyncio.Semaphore(RECOVERY_CONCURRENCY)
+        rate_limiter = DomainRateLimiter(delay=RECOVERY_HOST_DELAY)
+
+        async def check_one(url):
+            domain = urlparse(url).netloc
+            # Wait for per-domain rate limit BEFORE acquiring the semaphore slot.
+            # If we slept inside the sem, a slow domain would pin a slot for the
+            # entire delay period, blocking unrelated domains from running.
+            await rate_limiter.wait(domain)
+            async with sem:
+                try:
+                    headers = self.middleware.get_random_header()
+                    proxy = self.middleware.get_random_proxy()
+                    async with session.get(
+                        url, headers=headers, proxy=proxy,
+                        timeout=FETCH_TIMEOUT, ssl=False, allow_redirects=True
+                    ) as resp:
+                        if resp.status == 200:
+                            recovered_urls.append(url)
+                            logging.info(f"[Recovered] {url} — now returns 200")
+                        else:
+                            surviving.add(url)
+                except Exception:
+                    surviving.add(url)
+
+        await asyncio.gather(*[check_one(url) for url in self.blacklist])
 
         self.blacklist = surviving
         async with aiofiles.open("blacklist.txt", "w", encoding="utf-8") as f:
             for url in sorted(surviving):
                 await f.write(url + "\n")
 
-        print(f"  Recovered: {recovered} URLs (false positives removed)")
-        print(f"  Still dead: {still_dead} URLs kept in blacklist")
+        print(f"  Recovered: {len(recovered_urls)} URLs (false positives removed)")
+        print(f"  Still dead: {len(surviving)} URLs kept in blacklist")
         self.stats['blacklisted'] = len(surviving)
+
+        # Persist recovered URLs so the next crawl run re-fetches their content.
+        # load_pending_queue() reads-and-deletes the file (returns [] if absent),
+        # so merging works correctly whether we're in the normal or interrupted path.
+        if recovered_urls:
+            existing = self.storage.load_pending_queue()
+            merged = list(dict.fromkeys(existing + recovered_urls))  # deduplicate, preserve order
+            self.storage.save_pending_queue(merged)
+            print(f"  Queued {len(recovered_urls)} recovered URLs for next crawl run")
 
 
 if __name__ == "__main__":
