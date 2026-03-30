@@ -22,6 +22,9 @@ if [ "$FRESH" = "1" ]; then
     echo ""
 fi
 
+echo "Cleaning up orphaned Chromium processes..."
+pkill -f chromium || true
+
 echo "Phase 1: Python crawler..."
 "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/main.py"
 

@@ -105,8 +105,16 @@ class PlaywrightManager:
             self.available = False
 
     async def stop(self):
-        if self.browser: await self.browser.close()
-        if self.playwright: await self.playwright.stop()
+        if self.browser:
+            try:
+                await self.browser.close()
+            except Exception:
+                pass  # browser process already dead (proxy crash, OOM kill, Ctrl+C race)
+        if self.playwright:
+            try:
+                await self.playwright.stop()
+            except Exception:
+                pass
 
     async def fetch_page(self, url):
         if not self.available:
