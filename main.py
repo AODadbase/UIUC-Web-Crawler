@@ -9,6 +9,7 @@ import signal
 import socket
 import trafilatura
 import lxml.html
+from collections import Counter
 from urllib.parse import urlparse, urljoin, urldefrag
 from datetime import datetime
 import time
@@ -18,8 +19,9 @@ from playwright.async_api import async_playwright
 
 # ================= Configuration =================
 ROOT_DOMAIN = "illinois.edu"
-MAX_PAGES_TOTAL = 300
-CONCURRENCY = 10          # main crawler workers (1 worker ≈ 1 proxy IP)
+# Configurable hard cap. Set MAX_PAGES_TOTAL=0 to disable the cap entirely.
+MAX_PAGES_TOTAL = int(os.environ.get("MAX_PAGES_TOTAL", "5000"))
+CONCURRENCY = 2           # main crawler workers (1 worker ≈ 1 proxy IP)
 DATA_DIR = "uiuc_knowledge_base"
 
 POLITENESS_DELAY = 2.0
@@ -199,9 +201,12 @@ class UnifiedCrawler:
         self.rate_limiter = DomainRateLimiter()
         self.retry_counts = {}
         self.stats = {"scanned": 0, "new": 0, "updated": 0, "skipped": 0, "deleted": 0, "blacklisted": 0}
+        self.failure_stats = Counter()
+        self.drop_stats = Counter()
         self._shutting_down = False
         self._shutdown_event = None  # set in start() once the event loop is running
         self._queue_persisted = False  # set True once pending queue has been saved/cleared
+        self._page_cap_reached = False
 
         self.blacklist = set()
         self._load_blacklist()
@@ -234,6 +239,10 @@ class UnifiedCrawler:
                 restored_pending += 1
         if restored_pending:
             print(f"Restored {restored_pending} pending URLs from interrupted crawl")
+
+    def _under_page_cap(self):
+        """Return True if enqueue should continue under the configured page cap."""
+        return MAX_PAGES_TOTAL <= 0 or self.stats['scanned'] < MAX_PAGES_TOTAL
 
     def _is_fresh(self, url):
         """Return True if url was crawled recently enough to skip re-queuing."""
@@ -356,6 +365,21 @@ class UnifiedCrawler:
             print(f"Updated pages:  {self.stats['updated']}")
             print(f"Skipped pages:  {self.stats['skipped']}")
             print(f"Deleted pages:  {self.stats['deleted']}")
+            print(f"Queue remaining: {self.queue.qsize()}")
+            if MAX_PAGES_TOTAL > 0:
+                print(f"Page cap:       {MAX_PAGES_TOTAL} (reached={self._page_cap_reached})")
+            else:
+                print("Page cap:       disabled")
+
+            if self.failure_stats:
+                print("Failure stats:")
+                for key, value in self.failure_stats.most_common():
+                    print(f"  - {key}: {value}")
+
+            if self.drop_stats:
+                print("Drop stats:")
+                for key, value in self.drop_stats.most_common():
+                    print(f"  - {key}: {value}")
             print("=" * 40)
 
     def _request_shutdown(self):
@@ -559,30 +583,35 @@ class UnifiedCrawler:
                         return html_text, False
 
                     elif response.status in [401, 403]:
+                        self.failure_stats[f"http_{response.status}"] += 1
                         logging.warning(f"[{response.status}] {url} — attempt {attempt}/{MAX_RETRIES_PER_DOMAIN}")
                         if attempt >= MAX_RETRIES_PER_DOMAIN:
                             await self.add_to_blacklist(url)
                             return "", False
 
                     elif response.status == 404:
+                        self.failure_stats["http_404"] += 1
                         logging.warning(f"[404] {url} — attempt {attempt}/{MAX_RETRIES_PER_DOMAIN}")
                         if attempt >= MAX_RETRIES_PER_DOMAIN:
                             await self.add_to_blacklist(url)
                             return "", False
 
                     elif response.status == 429:
+                        self.failure_stats["http_429"] += 1
                         logging.warning(f"[429 Rate limit] {url} — attempt {attempt}/{MAX_RETRIES_PER_DOMAIN}")
                         if attempt >= MAX_RETRIES_PER_DOMAIN:
                             await self.add_to_blacklist(url)
                             return "", False
 
                     else:
+                        self.failure_stats[f"http_{response.status}"] += 1
                         logging.warning(f"[HTTP {response.status}] {url} — attempt {attempt}/{MAX_RETRIES_PER_DOMAIN}")
                         if attempt >= MAX_RETRIES_PER_DOMAIN:
                             await self.add_to_blacklist(url)
                             return "", False
 
             except Exception as e:
+                self.failure_stats["network_exception"] += 1
                 logging.warning(f"[Network error] {url} — attempt {attempt}/{MAX_RETRIES_PER_DOMAIN}: {e}")
                 if attempt >= MAX_RETRIES_PER_DOMAIN:
                     await self.add_to_blacklist(url)
@@ -625,6 +654,12 @@ class UnifiedCrawler:
 
                 # Increment scanned here so MAX_PAGES_TOTAL is actually enforced.
                 self.stats['scanned'] += 1
+                if MAX_PAGES_TOTAL > 0 and self.stats['scanned'] >= MAX_PAGES_TOTAL and not self._page_cap_reached:
+                    self._page_cap_reached = True
+                    logging.warning(
+                        f"Reached MAX_PAGES_TOTAL={MAX_PAGES_TOTAL}. "
+                        "Crawler will continue draining current queue but stop enqueueing new links."
+                    )
 
                 use_playwright = self.pw_manager.available and any(kw in url for kw in DYNAMIC_KEYWORDS)
 
@@ -633,6 +668,8 @@ class UnifiedCrawler:
 
                 if use_playwright:
                     html_text = await self.pw_manager.fetch_page(url)
+                    if not html_text:
+                        self.failure_stats["playwright_fetch_failed"] += 1
                 else:
                     html_text, network_error = await self._fetch_with_retry(session, url, domain)
 
@@ -650,6 +687,10 @@ class UnifiedCrawler:
 
                 if html_text and len(html_text) > 100:
                     await self.process_html(html_text, url)
+                elif html_text:
+                    self.drop_stats["html_too_short"] += 1
+                else:
+                    self.drop_stats["empty_html"] += 1
 
             except asyncio.CancelledError:
                 break
@@ -663,6 +704,7 @@ class UnifiedCrawler:
         parser = UIUCPageParser(html, url)
         data = parser.parse()
         if not data:
+            self.drop_stats["parser_returned_none"] += 1
             return
 
         content_hash = hashlib.md5(data['content'].encode('utf-8')).hexdigest()
@@ -681,17 +723,26 @@ class UnifiedCrawler:
         else:
             self.stats['skipped'] += 1
 
-        if self.stats['scanned'] < MAX_PAGES_TOTAL and not self._shutting_down:
+        if self._under_page_cap() and not self._shutting_down:
             for link in data.get('links', []):
                 # Links are already absolute and fragment-stripped by UIUCPageParser;
                 # do NOT re-apply urljoin/urldefrag here.
-                if self._is_fresh(link) or link in self.blacklist:
+                fresh = self._is_fresh(link)
+                if fresh or link in self.blacklist:
+                    if fresh:
+                        self.drop_stats["skip_fresh_link"] += 1
+                    else:
+                        self.drop_stats["skip_blacklisted_link"] += 1
                     continue
                 parsed = urlparse(link)
                 if parsed.netloc.endswith(ROOT_DOMAIN) and parsed.scheme in ['http', 'https']:
                     if not link.endswith(('.pdf', '.jpg', '.png', '.css', '.js')):
                         self.visited[link] = time.time()
                         self.queue.put_nowait(link)
+                    else:
+                        self.drop_stats["skip_binary_or_asset"] += 1
+                else:
+                    self.drop_stats["skip_offscope_or_scheme"] += 1
 
     async def prune_stale_content(self, session):
         """Check previously seen URLs concurrently; remove content that no longer exists."""
